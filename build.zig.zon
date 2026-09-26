@@ -1,0 +1,36 @@
+.{
+    .name = .nxdk_zig,
+    .version = "0.0.1",
+    .fingerprint = 0xafa22edb596eb105, // Changing this has security and trust implications.
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{
+        .nxdk = .{
+            .url = "git+https://github.com/XboxDev/nxdk.git#58427c078b4ccb0121f359b6b6c536b3b2914976",
+            .hash = "N-V-__8AAK5ZhwMGPAIV8BGKf64Rer0K3pCvDQEHFRffCRcJ",
+        },
+        .@"nxdk-pdclib" = .{
+            .url = "git+https://github.com/XboxDev/nxdk-pdclib.git#679081d4725ab893d0ef7822111b5c5d05a572f5",
+            .hash = "N-V-__8AAF8BEgBgzcJkh6Fvv49mcgePeyin74vFSse7ekD6",
+        },
+        .@"nxdk-libcxx" = .{
+            .url = "git+https://github.com/XboxDev/nxdk-libcxx.git#3111bbf75a5f89d382c7f3366a166b662d43048a",
+            .hash = "N-V-__8AAJBDxgEu9Kx8lq-lvEEWBnJ0XhXfFsT2IYlvKkmo",
+        },
+        .@"extract-xiso" = .{
+            .url = "git+https://github.com/XboxDev/extract-xiso.git#b72e5b60d598ec6df80534cda19cdcd4361aa18c",
+            .hash = "N-V-__8AAP5-AQAtsjLXvPG54fV-jWy8VtUo0Yht4Q-VFmWB",
+        },
+        .lwip = .{
+            .url = "git+https://github.com/lwip-tcpip/lwip.git#STABLE-2_2_1_RELEASE",
+            .hash = "N-V-__8AACvNdQDS3TeYO1TRpY4Sa8mSh-PZ-0byqy8GTJ0e",
+        },
+        // .@"libjpeg-turbo" = .{
+        //     .url = "git+https://github.com/libjpeg-turbo/libjpeg-turbo.git#2.0.4",
+        //     .hash = "N-V-__8AANgyewBPvIuvY26aHxw3fYPyQL_JBAhQ0jMiE5QK",
+        // },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+    },
+}
