@@ -188,8 +188,8 @@ pub const PULARGE_INTEGER = *_ULARGE_INTEGER;
 ///
 /// Initialized by InitializeListHead, members shouldn't be updated manually.
 pub const _LIST_ENTRY = extern struct {
-    Flink: ?*_LIST_ENTRY, // Points to the next entry of the list or the header if there is no next entry
-    Blink: ?*_LIST_ENTRY, // Points to the previous entry of the list or the header if there is no previous entry
+    Flink: *_LIST_ENTRY, // Points to the next entry of the list or the header if there is no next entry
+    Blink: *_LIST_ENTRY, // Points to the previous entry of the list or the header if there is no previous entry
 };
 pub const LIST_ENTRY = _LIST_ENTRY;
 pub const PLIST_ENTRY = *_LIST_ENTRY;

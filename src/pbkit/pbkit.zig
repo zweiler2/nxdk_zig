@@ -1,10 +1,10 @@
 const xboxkrnl = @import("xboxkrnl");
 
-///shows scene (allows VBL synced screen swapping)
+/// Shows scene (allows VBL synced screen swapping)
 pub extern fn pb_show_front_screen() void;
-///shows debug screen (default openxdk+SDL buffer)
+/// Shows debug screen (default openxdk+SDL buffer)
 pub extern fn pb_show_debug_screen() void;
-///shows depth screen (depth stencil buffer)
+/// Shows depth screen (depth stencil buffer)
 pub extern fn pb_show_depth_screen() void;
 
 pub extern fn pb_get_vbl_counter() xboxkrnl.xboxdef.DWORD;
