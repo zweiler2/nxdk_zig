@@ -12,6 +12,12 @@ pub fn build(b: *std.Build) !void {
     const target = b.resolveTargetQuery(target_query);
     const optimize = b.standardOptimizeOption(.{});
 
+    const panic_mod = b.addModule("panic", .{
+        .root_source_file = b.path("src/panic.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     const nxdk_dep = b.dependency("nxdk", .{});
     const cxbe_exe = try buildCXBEBin(b, optimize, nxdk_dep);
     b.installArtifact(cxbe_exe);
@@ -150,6 +156,7 @@ pub fn build(b: *std.Build) !void {
         }},
     });
     nxdk_hal_mod.linkLibrary(libnxdk_hal);
+    panic_mod.addImport("nxdk_hal", nxdk_hal_mod);
 
     const libxboxrt = try buildLib(.{
         .b = b,
@@ -372,6 +379,7 @@ pub fn build(b: *std.Build) !void {
     };
     for (examples) |name| {
         try buildExample(b, target, optimize, example_step, name, .{
+            .panic = panic_mod,
             .pdclib = pdclib_mod,
             .nxdk = nxdk_mod,
             .xboxrt = xboxrt_mod,
@@ -392,10 +400,11 @@ pub fn setupExe(nxdk_zig_dep: *std.Build.Dependency, b: *std.Build, optimize: st
     exe.root_module.resolved_target = b.resolveTargetQuery(target_query);
 
     const nxdk_dep = nxdk_zig_dep.builder.dependency("nxdk", .{});
-    const extract_xiso_dep = nxdk_zig_dep.builder.dependency("extract-xiso", .{});
-
     const convert_step = try convertEXE(b, optimize, &exe.step, nxdk_dep, exe.name, exe.getEmittedBin(), ".");
+
+    const extract_xiso_dep = nxdk_zig_dep.builder.dependency("extract-xiso", .{});
     const create_xiso = try createXISO(b, optimize, convert_step, extract_xiso_dep, exe.name, ".");
+
     b.getInstallStep().dependOn(create_xiso);
 }
 
@@ -673,6 +682,7 @@ fn buildExample(
     example_step: *std.Build.Step,
     name: []const u8,
     example_deps: struct {
+        panic: *std.Build.Module,
         pdclib: *std.Build.Module,
         nxdk: *std.Build.Module,
         xboxrt: *std.Build.Module,
@@ -701,6 +711,7 @@ fn buildExample(
         .pdb_dir = .{ .override = .{ .custom = "examples/bin" } },
     });
 
+    exe.root_module.addImport("panic", example_deps.panic);
     exe.root_module.addImport("pdclib", example_deps.pdclib);
     exe.root_module.addImport("nxdk", example_deps.nxdk);
     exe.root_module.addImport("xboxrt", example_deps.xboxrt);

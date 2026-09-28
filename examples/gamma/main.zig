@@ -2,6 +2,8 @@ const std = @import("std");
 const nxdk_hal = @import("nxdk_hal");
 const winapi = @import("winapi");
 
+pub const panic = @import("panic").panic;
+
 fn drawTitle(title: [:0]const u8) void {
     nxdk_hal.debug.nextCol = 25;
     nxdk_hal.debug.nextRow = 25;

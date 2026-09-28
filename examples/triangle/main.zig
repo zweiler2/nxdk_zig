@@ -35,6 +35,8 @@ fn MASK(mask: xboxkrnl.xboxdef.DWORD, val: xboxkrnl.xboxdef.DWORD) xboxkrnl.xbox
     return ((val) << @as(u5, @intCast(@ctz(mask)))) & mask;
 }
 
+pub const panic = @import("panic").panic;
+
 // Main program function
 pub export fn main() u8 {
     _ = nxdk_hal.video.XVideoSetMode(640, 480, 32, nxdk_hal.video.REFRESH_DEFAULT);

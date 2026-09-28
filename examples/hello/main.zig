@@ -1,6 +1,8 @@
 const nxdk_hal = @import("nxdk_hal");
 const winapi = @import("winapi");
 
+pub const panic = @import("panic").panic;
+
 pub export fn main() u8 {
     _ = nxdk_hal.video.XVideoSetMode(640, 480, 32, nxdk_hal.video.REFRESH_DEFAULT);
 

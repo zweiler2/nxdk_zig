@@ -2,6 +2,8 @@ const nxdk_hal = @import("nxdk_hal");
 const winapi = @import("winapi");
 const xboxkrnl = @import("xboxkrnl");
 
+pub const panic = @import("panic").panic;
+
 fn remap(in_low: f32, in_high: f32, out_low: f32, out_high: f32, value: f32) f32 {
     var value_: f32 = value;
     // [in_low; in_high]
