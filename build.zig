@@ -398,6 +398,7 @@ pub fn setupExe(nxdk_zig_dep: *std.Build.Dependency, b: *std.Build, optimize: st
     exe.subsystem = .windows;
     exe.entry = .{ .symbol_name = "WinMainCRTStartup" };
     exe.root_module.resolved_target = b.resolveTargetQuery(target_query);
+    exe.root_module.single_threaded = true;
 
     const nxdk_dep = nxdk_zig_dep.builder.dependency("nxdk", .{});
     const convert_step = try convertEXE(b, optimize, &exe.step, nxdk_dep, exe.name, exe.getEmittedBin(), ".");
@@ -422,6 +423,7 @@ fn convertEXE(
     cmd.addArtifactArg(cxbe_exe);
     const xbe = cmd.addPrefixedOutputFileArg("-OUT:", b.fmt("{s}.xbe", .{app_title}));
     cmd.addArg(b.fmt("-TITLE:{s}", .{app_title}));
+    cmd.addArg(b.fmt("-MODE:{s}", .{if (optimize == .Debug) "debug" else "retail"}));
     cmd.setCwd(b.path("."));
     cmd.addFileArg(app_path);
     cmd.expectExitCode(0);
@@ -699,6 +701,7 @@ fn buildExample(
             .root_source_file = b.path(b.fmt("examples/{s}/main.zig", .{name})),
             .target = target,
             .optimize = optimize,
+            .single_threaded = true,
         }),
     });
     exe.image_base = 0x0001_0000;
