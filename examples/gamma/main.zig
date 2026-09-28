@@ -5,8 +5,7 @@ const winapi = @import("winapi");
 pub const panic = @import("panic").panic;
 
 fn drawTitle(title: [:0]const u8) void {
-    nxdk_hal.debug.nextCol = 25;
-    nxdk_hal.debug.nextRow = 25;
+    nxdk_hal.debug.debugResetCursor();
     nxdk_hal.debug.debugPrint("%s", title.ptr);
     var i: usize = title.len;
     while (i < 60) : (i += 1) {

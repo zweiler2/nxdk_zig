@@ -16,9 +16,3 @@ pub extern fn debugClearScreen() void;
 pub extern fn debugAdvanceScreen() void;
 pub extern fn debugMoveCursor(x: c_int, y: c_int) void;
 pub extern fn debugResetCursor() void;
-
-pub const MARGIN = 25;
-pub const MARGINS = 50; // MARGIN*2
-
-pub extern var nextRow: c_int;
-pub extern var nextCol: c_int;
