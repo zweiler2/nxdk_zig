@@ -8,18 +8,16 @@ pub const target_query: std.Target.Query = .{
     .os_tag = .windows,
 };
 
-var nxdk_dep: *std.Build.Dependency = undefined;
-var extract_xiso_dep: *std.Build.Dependency = undefined;
-
 pub fn build(b: *std.Build) !void {
     const target = b.resolveTargetQuery(target_query);
     const optimize = b.standardOptimizeOption(.{});
 
-    nxdk_dep = b.dependency("nxdk", .{});
-    extract_xiso_dep = b.dependency("extract-xiso", .{});
-    const cxbe_exe = try buildCXBEBin(b, optimize);
+    const nxdk_dep = b.dependency("nxdk", .{});
+    const cxbe_exe = try buildCXBEBin(b, optimize, nxdk_dep);
     b.installArtifact(cxbe_exe);
-    const extract_xiso_exe = try buildExtractXISOBin(b, optimize);
+
+    const extract_xiso_dep = b.dependency("extract-xiso", .{});
+    const extract_xiso_exe = try buildExtractXISOBin(b, optimize, extract_xiso_dep);
     b.installArtifact(extract_xiso_exe);
 
     const xboxkrnl_lib_path = genKernelLib(b);
@@ -61,7 +59,12 @@ pub fn build(b: *std.Build) !void {
             },
         },
     });
-    _ = libpdclib;
+    const pdclib_mod = b.addModule("pdclib", .{
+        .root_source_file = b.path("src/pdclib/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    pdclib_mod.linkLibrary(libpdclib);
 
     const libnxdk = try buildLib(.{
         .b = b,
@@ -102,7 +105,12 @@ pub fn build(b: *std.Build) !void {
             },
         },
     });
-    _ = libnxdk;
+    const nxdk_mod = b.addModule("nxdk", .{
+        .root_source_file = b.path("src/nxdk/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    nxdk_mod.linkLibrary(libnxdk);
 
     const libnxdk_hal = try buildLib(.{
         .b = b,
@@ -175,7 +183,7 @@ pub fn build(b: *std.Build) !void {
             },
         },
     });
-    const libxboxrt_mod = b.addModule("xboxrt", .{
+    const xboxrt_mod = b.addModule("xboxrt", .{
         .root_source_file = b.path("src/xboxrt/root.zig"),
         .target = target,
         .optimize = optimize,
@@ -184,7 +192,7 @@ pub fn build(b: *std.Build) !void {
             .module = xboxkrnl_mod,
         }},
     });
-    libxboxrt_mod.linkLibrary(libxboxrt);
+    xboxrt_mod.linkLibrary(libxboxrt);
 
     const libpbkit = try buildLib(.{
         .b = b,
@@ -214,7 +222,7 @@ pub fn build(b: *std.Build) !void {
             },
         },
     });
-    const libpbkit_mod = b.addModule("pbkit", .{
+    const pbkit_mod = b.addModule("pbkit", .{
         .root_source_file = b.path("src/pbkit/root.zig"),
         .target = target,
         .optimize = optimize,
@@ -223,7 +231,7 @@ pub fn build(b: *std.Build) !void {
             .module = xboxkrnl_mod,
         }},
     });
-    libpbkit_mod.linkLibrary(libpbkit);
+    pbkit_mod.linkLibrary(libpbkit);
 
     // const libjpeg = try buildLib(.{
     //     .b = b,
@@ -262,7 +270,7 @@ pub fn build(b: *std.Build) !void {
     // });
     // _ = libjpeg;
 
-    const winmm = try buildLib(.{
+    const libwinmm = try buildLib(.{
         .b = b,
         .target = target,
         .optimize = optimize,
@@ -291,7 +299,12 @@ pub fn build(b: *std.Build) !void {
             },
         },
     });
-    _ = winmm;
+    const winmm_mod = b.addModule("winmm", .{
+        .root_source_file = b.path("src/winmm/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    winmm_mod.linkLibrary(libwinmm);
 
     const libwinapi = try buildLib(.{
         .b = b,
@@ -322,7 +335,7 @@ pub fn build(b: *std.Build) !void {
             },
         },
     });
-    const libwinapi_mod = b.addModule("winapi", .{
+    const winapi_mod = b.addModule("winapi", .{
         .root_source_file = b.path("src/winapi/root.zig"),
         .target = target,
         .optimize = optimize,
@@ -333,12 +346,12 @@ pub fn build(b: *std.Build) !void {
             },
             .{
                 .name = "xboxrt",
-                .module = libxboxrt_mod,
+                .module = xboxrt_mod,
             },
         },
     });
-    libwinapi_mod.linkLibrary(libwinapi);
-    libxboxrt_mod.addImport("winapi", libwinapi_mod);
+    winapi_mod.linkLibrary(libwinapi);
+    xboxrt_mod.addImport("winapi", winapi_mod);
 
     const mod_tests = b.addTest(.{
         .root_module = b.createModule(.{
@@ -352,41 +365,50 @@ pub fn build(b: *std.Build) !void {
     const run_mod_tests = b.addRunArtifact(mod_tests);
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_mod_tests.step);
+
+    const example_step = b.step("examples", "Build the examples");
+    const examples: []const []const u8 = &.{
+        "hello", "gamma", "gamma-fade", "led", "triangle",
+    };
+    for (examples) |name| {
+        try buildExample(b, target, optimize, example_step, name, .{
+            .pdclib = pdclib_mod,
+            .nxdk = nxdk_mod,
+            .xboxrt = xboxrt_mod,
+            .winmm = winmm_mod,
+            .xboxkrnl = xboxkrnl_mod,
+            .nxdk_hal = nxdk_hal_mod,
+            .winapi = winapi_mod,
+            .pbkit = pbkit_mod,
+        });
+    }
 }
 
-pub fn setupExe(b: *std.Build, optimize: std.builtin.OptimizeMode, exe: *std.Build.Step.Compile) !void {
+pub fn setupExe(nxdk_zig_dep: *std.Build.Dependency, b: *std.Build, optimize: std.builtin.OptimizeMode, exe: *std.Build.Step.Compile) !void {
     exe.image_base = 0x0001_0000;
     exe.stack_size = 65536;
     exe.subsystem = .windows;
     exe.entry = .{ .symbol_name = "WinMainCRTStartup" };
     exe.root_module.resolved_target = b.resolveTargetQuery(target_query);
 
-    const this = b.dependencyFromBuildZig(@This(), .{
-        .optimize = optimize,
-    });
+    const nxdk_dep = nxdk_zig_dep.builder.dependency("nxdk", .{});
+    const extract_xiso_dep = nxdk_zig_dep.builder.dependency("extract-xiso", .{});
 
-    exe.root_module.linkLibrary(this.artifact("libpdclib"));
-    exe.root_module.linkLibrary(this.artifact("libnxdk"));
-    // exe.root_module.linkLibrary(this.artifact("libnxdk_hal"));
-    // exe.root_module.linkLibrary(this.artifact("libwinapi"));
-    exe.root_module.linkLibrary(this.artifact("libxboxrt"));
-    exe.root_module.linkLibrary(this.artifact("libpbkit"));
-    exe.root_module.linkLibrary(this.artifact("winmm"));
-
-    // exe.root_module.addObjectFile(this.namedLazyPath("libxboxkrnl").path(b, "libxboxkrnl.lib"));
-
-    const convert_step = try convertEXE(b, optimize, &exe.step, exe.name, exe.getEmittedBin());
-    try createXISO(b, optimize, convert_step, exe.name);
+    const convert_step = try convertEXE(b, optimize, &exe.step, nxdk_dep, exe.name, exe.getEmittedBin(), ".");
+    const create_xiso = try createXISO(b, optimize, convert_step, extract_xiso_dep, exe.name, ".");
+    b.getInstallStep().dependOn(create_xiso);
 }
 
 fn convertEXE(
     b: *std.Build,
     optimize: std.builtin.OptimizeMode,
     prevoius_step: *std.Build.Step,
+    nxdk_dep: *std.Build.Dependency,
     app_title: []const u8,
     app_path: std.Build.LazyPath,
+    output_path: []const u8,
 ) !*std.Build.Step {
-    const cxbe_exe = try buildCXBEBin(b, optimize);
+    const cxbe_exe = try buildCXBEBin(b, optimize, nxdk_dep);
     const cmd = std.Build.Step.Run.create(b, b.fmt("run cxbe_exe", .{}));
     cmd.addArtifactArg(cxbe_exe);
     const xbe = cmd.addPrefixedOutputFileArg("-OUT:", b.fmt("{s}.xbe", .{app_title}));
@@ -400,7 +422,7 @@ fn convertEXE(
 
     const install_xbe = b.addInstallFileWithDir(
         xbe,
-        .{ .custom = b.fmt("xbin/{s}", .{app_title}) },
+        .{ .custom = b.fmt("{s}/xbin/{s}", .{ output_path, app_title }) },
         "default.xbe",
     );
     install_xbe.step.dependOn(&cmd.step);
@@ -412,15 +434,17 @@ fn createXISO(
     b: *std.Build,
     optimize: std.builtin.OptimizeMode,
     prevoius_step: *std.Build.Step,
+    extract_xiso_dep: *std.Build.Dependency,
     app_title: []const u8,
-) !void {
-    const extract_xiso_exe = try buildExtractXISOBin(b, optimize);
+    output_path: []const u8,
+) !*std.Build.Step {
+    const extract_xiso_exe = try buildExtractXISOBin(b, optimize, extract_xiso_dep);
     const cmd = std.Build.Step.Run.create(b, b.fmt("run cxbe_exe", .{}));
     cmd.addArtifactArg(extract_xiso_exe);
     cmd.addArgs(&.{
         "-c",
-        b.fmt("zig-out/xbin/{s}", .{app_title}),
-        b.fmt("zig-out/{s}.iso", .{app_title}),
+        b.fmt("zig-out/{s}/xbin/{s}", .{ output_path, app_title }),
+        b.fmt("zig-out/{s}/{s}.iso", .{ output_path, app_title }),
     });
     cmd.setCwd(b.path("."));
     cmd.expectExitCode(0);
@@ -428,7 +452,7 @@ fn createXISO(
     cmd.step.dependOn(&extract_xiso_exe.step);
     cmd.step.dependOn(prevoius_step);
 
-    b.getInstallStep().dependOn(&cmd.step);
+    return &cmd.step;
 }
 
 fn buildLib(info: LibInfo) !*std.Build.Step.Compile {
@@ -487,7 +511,7 @@ fn genKernelLib(b: *std.Build) std.Build.LazyPath {
     return b.path(".zig-cache/libxboxkrnl.lib");
 }
 
-fn buildCXBEBin(b: *std.Build, optimize: std.builtin.OptimizeMode) !*std.Build.Step.Compile {
+fn buildCXBEBin(b: *std.Build, optimize: std.builtin.OptimizeMode, nxdk_dep: *std.Build.Dependency) !*std.Build.Step.Compile {
     const exe = b.addExecutable(.{
         .name = "cxbe",
         .root_module = b.createModule(.{
@@ -506,7 +530,7 @@ fn buildCXBEBin(b: *std.Build, optimize: std.builtin.OptimizeMode) !*std.Build.S
     return exe;
 }
 
-fn buildExtractXISOBin(b: *std.Build, optimize: std.builtin.OptimizeMode) !*std.Build.Step.Compile {
+fn buildExtractXISOBin(b: *std.Build, optimize: std.builtin.OptimizeMode, extract_xiso_dep: *std.Build.Dependency) !*std.Build.Step.Compile {
     const exe = b.addExecutable(.{
         .name = "extract-xiso",
         .root_module = b.createModule(.{
@@ -642,12 +666,63 @@ fn gatherCPPFilesIter(
     }
 }
 
+fn buildExample(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    example_step: *std.Build.Step,
+    name: []const u8,
+    example_deps: struct {
+        pdclib: *std.Build.Module,
+        nxdk: *std.Build.Module,
+        xboxrt: *std.Build.Module,
+        winmm: *std.Build.Module,
+        xboxkrnl: *std.Build.Module,
+        nxdk_hal: *std.Build.Module,
+        winapi: *std.Build.Module,
+        pbkit: *std.Build.Module,
+    },
+) !void {
+    const exe = b.addExecutable(.{
+        .name = name,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(b.fmt("examples/{s}/main.zig", .{name})),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    exe.image_base = 0x0001_0000;
+    exe.stack_size = 65536;
+    exe.subsystem = .windows;
+    exe.entry = .{ .symbol_name = "WinMainCRTStartup" };
+    exe.root_module.resolved_target = b.resolveTargetQuery(target_query);
+    const install_exe = b.addInstallArtifact(exe, .{
+        .dest_dir = .{ .override = .{ .custom = "examples/bin" } },
+        .pdb_dir = .{ .override = .{ .custom = "examples/bin" } },
+    });
+
+    exe.root_module.addImport("pdclib", example_deps.pdclib);
+    exe.root_module.addImport("nxdk", example_deps.nxdk);
+    exe.root_module.addImport("xboxrt", example_deps.xboxrt);
+    exe.root_module.addImport("winmm", example_deps.winmm);
+    exe.root_module.addImport("xboxkrnl", example_deps.xboxkrnl);
+    exe.root_module.addImport("nxdk_hal", example_deps.nxdk_hal);
+    exe.root_module.addImport("winapi", example_deps.winapi);
+    exe.root_module.addImport("pbkit", example_deps.pbkit);
+
+    const nxdk_dep = b.dependency("nxdk", .{});
+    const convert_step = try convertEXE(b, optimize, &install_exe.step, nxdk_dep, exe.name, exe.getEmittedBin(), "examples");
+
+    const extract_xiso_dep = b.dependency("extract-xiso", .{});
+    const create_xiso = try createXISO(b, optimize, convert_step, extract_xiso_dep, exe.name, "examples");
+
+    example_step.dependOn(create_xiso);
+}
+
 const LibInfo = struct {
     b: *std.Build,
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
-    // nxdk_dep: *std.Build.Dependency,
-    // nxdk_dep_include_paths: []const []const u8,
     lib_name: []const u8,
     lib_deps: []const struct {
         name: []const u8,
