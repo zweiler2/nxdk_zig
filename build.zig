@@ -500,7 +500,7 @@ fn convertExeToXboxExeWithDep(
     const cxbe_exe = try buildCXBEBin(b, optimize, nxdk_dep);
     const cmd = std.Build.Step.Run.create(b, b.fmt("run cxbe_exe", .{}));
     cmd.addArtifactArg(cxbe_exe);
-    const xbe = cmd.addPrefixedOutputFileArg("-OUT:", b.fmt("{s}.xbe", .{app_title}));
+    const xbe_file_path = cmd.addPrefixedOutputFileArg("-OUT:", b.fmt("{s}.xbe", .{app_title}));
     cmd.addArg(b.fmt("-TITLE:{s}", .{app_title}));
     cmd.addArg(b.fmt("-MODE:{s}", .{if (optimize == .Debug) "debug" else "retail"}));
     cmd.setCwd(b.path("."));
@@ -511,11 +511,21 @@ fn convertExeToXboxExeWithDep(
     cmd.step.dependOn(previous_step);
 
     const install_xbe = b.addInstallFileWithDir(
-        xbe,
+        xbe_file_path,
         .{ .custom = b.fmt("{s}/xbin/{s}", .{ output_path, app_title }) },
         "default.xbe",
     );
-    install_xbe.step.dependOn(&cmd.step);
+    if (exe.producesPdbFile()) {
+        const pdb_file_path = exe.getEmittedPdb();
+        const install_pdb = b.addInstallFileWithDir(
+            pdb_file_path,
+            .{ .custom = b.fmt("{s}/xbin/{s}", .{ output_path, app_title }) },
+            "default.pdb",
+        );
+        install_xbe.step.dependOn(&install_pdb.step);
+    } else {
+        install_xbe.step.dependOn(&cmd.step);
+    }
 
     return &install_xbe.step;
 }
