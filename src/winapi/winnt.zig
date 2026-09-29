@@ -1,6 +1,7 @@
 const xboxkrnl = @import("xboxkrnl");
 
-pub const LONG = xboxkrnl.xboxdef.HRESULT;
+pub const HRESULT = xboxkrnl.xboxdef.LONG;
+pub const SCODE = xboxkrnl.xboxdef.ULONG;
 
 pub const LPSTR = *xboxkrnl.xboxdef.CHAR;
 

@@ -13,6 +13,9 @@ pub const FASTCALL: std.builtin.CallingConvention = .{ .x86_fastcall = .{} };
 pub const DECLSPEC_NORETURN = noreturn;
 // pub const RESTRICTED_POINTER = "__restrict__";
 
+pub const TRUE = 1;
+pub const FALSE = 0;
+
 pub fn NT_SUCCESS(Status: xboxdef.NTSTATUS) bool {
     return Status >= 0;
 }

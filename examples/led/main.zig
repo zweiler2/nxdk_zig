@@ -1,9 +1,7 @@
 const nxdk_hal = @import("nxdk_hal");
 const winapi = @import("winapi");
 
-pub const panic = @import("panic").panic;
-
-pub export fn main() u8 {
+pub fn main() !void {
     // Set front LEDs to shine green, red and then turned off in a repeating pattern.
     nxdk_hal.led.XSetCustomLED(.XLED_GREEN, .XLED_RED, .XLED_OFF, .XLED_OFF);
 

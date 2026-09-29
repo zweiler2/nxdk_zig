@@ -37,15 +37,21 @@ fn MASK(mask: xboxkrnl.xboxdef.DWORD, val: xboxkrnl.xboxdef.DWORD) xboxkrnl.xbox
 
 pub const panic = @import("panic").panic;
 
-// Main program function
-pub export fn main() u8 {
+pub fn main() !void {
     _ = nxdk_hal.video.XVideoSetMode(640, 480, 32, nxdk_hal.video.REFRESH_DEFAULT);
+
+    if (false) {
+        var j = [_]u8{ '0', '1' };
+        const h: []u8 = &j;
+        const x = h[3];
+        _ = x;
+    }
 
     const status: c_int = pbkit.pbkit.pb_init();
     if (status != 0) {
         nxdk_hal.debug.debugPrint("pb_init Error %d\n", status);
         winapi.synchapi.Sleep(2000);
-        return 1;
+        return error.PbInitFailed;
     }
 
     pbkit.pbkit.pb_show_front_screen();

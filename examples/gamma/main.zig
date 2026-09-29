@@ -2,8 +2,6 @@ const std = @import("std");
 const nxdk_hal = @import("nxdk_hal");
 const winapi = @import("winapi");
 
-pub const panic = @import("panic").panic;
-
 fn drawTitle(title: [:0]const u8) void {
     nxdk_hal.debug.debugResetCursor();
     nxdk_hal.debug.debugPrint("%s", title.ptr);
@@ -13,7 +11,7 @@ fn drawTitle(title: [:0]const u8) void {
     }
 }
 
-pub export fn main() u8 {
+pub fn main() !void {
     _ = nxdk_hal.video.XVideoSetMode(640, 480, 32, nxdk_hal.video.REFRESH_DEFAULT);
 
     // Create test image in framebuffer

@@ -2,8 +2,6 @@ const nxdk_hal = @import("nxdk_hal");
 const winapi = @import("winapi");
 const xboxkrnl = @import("xboxkrnl");
 
-pub const panic = @import("panic").panic;
-
 fn remap(in_low: f32, in_high: f32, out_low: f32, out_high: f32, value: f32) f32 {
     var value_: f32 = value;
     // [in_low; in_high]
@@ -167,7 +165,7 @@ fn drawTitle(title: [:0]const u8) void {
     }
 }
 
-pub export fn main() u8 {
+pub fn main() !void {
     const duration: f32 = 2000.0;
 
     _ = nxdk_hal.video.XVideoSetMode(640, 480, 32, nxdk_hal.video.REFRESH_DEFAULT);
