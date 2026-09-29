@@ -602,22 +602,23 @@ fn buildLib(info: LibInfo) !*std.Build.Step.Compile {
 }
 
 fn genKernelLib(b: *std.Build) std.Build.LazyPath {
-    const dll_tool_cmd = b.addSystemCommand(&.{
-        b.graph.zig_exe, "dlltool", "-m", "i386", "-l", ".zig-cache/libxboxkrnl.lib", "-k", "-d",
+    const dlltool_cmd = b.addSystemCommand(&.{
+        b.graph.zig_exe, "dlltool", "-m", "i386", "-k",
     });
-    dll_tool_cmd.expectExitCode(0);
-    dll_tool_cmd.addFileArg(b.dependency("nxdk", .{}).path("lib/xboxkrnl/xboxkrnl.exe.def"));
-    dll_tool_cmd.setCwd(b.path("."));
+    const lib_path = dlltool_cmd.addPrefixedOutputFileArg("-l", "libxboxkrnl.lib");
+    dlltool_cmd.addPrefixedFileArg("-d", b.dependency("nxdk", .{}).path("lib/xboxkrnl/xboxkrnl.exe.def"));
+    dlltool_cmd.setName("dlltool_gen_xboxkrnl");
+    dlltool_cmd.setCwd(b.path("."));
+    dlltool_cmd.expectExitCode(0);
 
-    // b.addNamedLazyPath("libxboxkrnl", b.path(".zig-cache"));
     const install_kernellib = b.addInstallLibFile(
-        b.path(".zig-cache/libxboxkrnl.lib"),
+        lib_path,
         "libxboxkrnl.lib",
     );
-    install_kernellib.step.dependOn(&dll_tool_cmd.step);
+    install_kernellib.step.dependOn(&dlltool_cmd.step);
     b.getInstallStep().dependOn(&install_kernellib.step);
 
-    return b.path(".zig-cache/libxboxkrnl.lib");
+    return lib_path;
 }
 
 fn buildCXBEBin(b: *std.Build, optimize: std.builtin.OptimizeMode, nxdk_dep: *std.Build.Dependency) !*std.Build.Step.Compile {
