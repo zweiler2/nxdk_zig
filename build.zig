@@ -6,11 +6,14 @@ pub const target_query: std.Target.Query = .{
         .explicit = &std.Target.x86.cpu.pentium3,
     },
     .os_tag = .windows,
+    .abi = .msvc,
 };
 
 pub fn build(b: *std.Build) !void {
     const target = b.resolveTargetQuery(target_query);
     const optimize = b.standardOptimizeOption(.{});
+
+    const lto = b.option(std.zig.LtoMode, "lto", "LTO mode for the libraries/examples");
 
     const nxdk_dep = b.dependency("nxdk", .{});
     const cxbe_exe = try buildCXBEBin(b, optimize, nxdk_dep);
@@ -32,6 +35,7 @@ pub fn build(b: *std.Build) !void {
         .b = b,
         .target = target,
         .optimize = optimize,
+        .lto = lto,
         .lib_name = "libpdclib",
         .lib_deps = &.{
             .{
@@ -70,6 +74,7 @@ pub fn build(b: *std.Build) !void {
         .b = b,
         .target = target,
         .optimize = optimize,
+        .lto = lto,
         .lib_name = "libnxdk",
         .lib_deps = &.{
             .{
@@ -116,6 +121,7 @@ pub fn build(b: *std.Build) !void {
         .b = b,
         .target = target,
         .optimize = optimize,
+        .lto = lto,
         .lib_name = "libnxdk_hal",
         .lib_deps = &.{
             .{
@@ -155,6 +161,7 @@ pub fn build(b: *std.Build) !void {
         .b = b,
         .target = target,
         .optimize = optimize,
+        .lto = lto,
         .lib_name = "libxboxrt",
         .lib_deps = &.{
             .{
@@ -198,6 +205,7 @@ pub fn build(b: *std.Build) !void {
         .b = b,
         .target = target,
         .optimize = optimize,
+        .lto = lto,
         .lib_name = "libpbkit",
         .lib_deps = &.{
             .{
@@ -274,6 +282,7 @@ pub fn build(b: *std.Build) !void {
         .b = b,
         .target = target,
         .optimize = optimize,
+        .lto = lto,
         .lib_name = "winmm",
         .lib_deps = &.{
             .{
@@ -310,6 +319,7 @@ pub fn build(b: *std.Build) !void {
         .b = b,
         .target = target,
         .optimize = optimize,
+        .lto = lto,
         .lib_name = "libwinapi",
         .lib_deps = &.{
             .{
@@ -384,7 +394,7 @@ pub fn build(b: *std.Build) !void {
         "hello", "gamma", "gamma-fade", "led", "triangle",
     };
     for (examples) |name| {
-        try buildExample(b, optimize, example_step, name, .{
+        try buildExample(b, optimize, example_step, name, lto, .{
             .start = start_mod,
             .pdclib = pdclib_mod,
             .nxdk = nxdk_mod,
@@ -404,8 +414,10 @@ pub fn createExe(
     optimize: std.builtin.OptimizeMode,
     name: []const u8,
     root_source_file: std.Build.LazyPath,
+    /// NOTE: LTO on Debug builds disables `bundle_ubsan_rt`
+    lto: ?std.zig.LtoMode,
 ) !*std.Build.Step.Compile {
-    return createExeWithModules(b, optimize, name, root_source_file, .{
+    return createExeWithModules(b, optimize, name, root_source_file, lto, .{
         .start = nxdk_zig_dep.module("start"),
         .winapi = nxdk_zig_dep.module("winapi"),
         .xboxkrnl = nxdk_zig_dep.module("xboxkrnl"),
@@ -419,6 +431,8 @@ fn createExeWithModules(
     optimize: std.builtin.OptimizeMode,
     name: []const u8,
     root_source_file: std.Build.LazyPath,
+    /// NOTE: LTO on Debug builds disables `bundle_ubsan_rt`
+    lto: ?std.zig.LtoMode,
     mods: struct {
         start: *std.Build.Module,
         winapi: *std.Build.Module,
@@ -446,6 +460,10 @@ fn createExeWithModules(
         }),
     );
 
+    if (optimize == .Debug and (lto orelse .none) != .none) {
+        exe.bundle_ubsan_rt = false;
+    }
+    exe.lto = lto;
     exe.image_base = 0x0001_0000;
     exe.stack_size = 65536;
     exe.subsystem = .windows;
@@ -551,6 +569,10 @@ fn buildLib(info: LibInfo) !*std.Build.Step.Compile {
             .sanitize_c = .off,
         }),
     });
+    if (info.optimize == .Debug and (info.lto orelse .none) != .none) {
+        lib.bundle_ubsan_rt = false;
+    }
+    lib.lto = info.lto;
     info.b.installArtifact(lib);
     lib.image_base = 0x0001_0000;
     lib.stack_size = 65536;
@@ -758,6 +780,7 @@ fn buildExample(
     optimize: std.builtin.OptimizeMode,
     example_step: *std.Build.Step,
     name: []const u8,
+    lto: ?std.zig.LtoMode,
     mods: struct {
         start: *std.Build.Module,
         pdclib: *std.Build.Module,
@@ -775,6 +798,7 @@ fn buildExample(
         optimize,
         name,
         b.path(b.fmt("examples/{s}/main.zig", .{name})),
+        lto,
         .{
             .start = mods.start,
             .winapi = mods.winapi,
@@ -786,7 +810,6 @@ fn buildExample(
 
     const install_exe = b.addInstallArtifact(exe, .{
         .dest_dir = .{ .override = .{ .custom = "examples/bin" } },
-        .pdb_dir = .{ .override = .{ .custom = "examples/bin" } },
     });
 
     exe.root_module.addImport("pdclib", mods.pdclib);
@@ -820,6 +843,8 @@ const LibInfo = struct {
     b: *std.Build,
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
+    /// NOTE: LTO on Debug builds disables `bundle_ubsan_rt`
+    lto: ?std.zig.LtoMode,
     lib_name: []const u8,
     lib_deps: []const struct {
         name: []const u8,
@@ -829,13 +854,9 @@ const LibInfo = struct {
     },
 };
 
-pub const asm_flags: []const []const u8 = &.{
-    "-target", "i386-pc-win32",
-};
+pub const asm_flags: []const []const u8 = &.{};
 
 pub const c_flags: []const []const u8 = &.{
-    "-target",
-    "i386-pc-win32",
     "-ffreestanding",
     "-nostdlib",
     "-fno-builtin",
@@ -843,16 +864,9 @@ pub const c_flags: []const []const u8 = &.{
     "-DNXDK",
     "-D__STDC__=1",
     "-U__STDC_NO_THREADS__",
-
-    "-fshort-wchar",
-    "-fdeclspec",
-    "-fms-extensions",
-    "-Wno-ignored-attributes",
 };
 
 pub const cpp_flags: []const []const u8 = &.{
-    "-target",
-    "i386-pc-win32",
     "-ffreestanding",
     "-nostdlib",
     "-fno-builtin",
@@ -861,9 +875,4 @@ pub const cpp_flags: []const []const u8 = &.{
     "-D__STDC__=1",
     "-U__STDC_NO_THREADS__",
     "-fno-exceptions",
-
-    "-fshort-wchar",
-    "-fdeclspec",
-    "-fms-extensions",
-    "-Wno-ignored-attributes",
 };
