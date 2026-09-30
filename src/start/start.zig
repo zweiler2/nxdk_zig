@@ -18,6 +18,9 @@ pub const os = struct {
 };
 pub const debug = struct {
     pub const SelfInfo = @import("SelfInfo.zig");
+    pub fn getDebugInfoAllocator() std.mem.Allocator {
+        return os.heap.page_allocator;
+    }
 };
 
 pub export fn main() u8 {
@@ -47,11 +50,11 @@ pub export fn main() u8 {
     defer threaded.deinit();
 
     var environ_map = std.process.Environ.createMap(.empty, gpa) catch |err|
-        std.process.fatal("failed to parse environment variables: {t}", .{err});
+        std.debug.panic("failed to parse environment variables: {t}", .{err});
     defer environ_map.deinit();
 
     const preopens = std.process.Preopens.init(arena_allocator.allocator()) catch |err|
-        std.process.fatal("failed to init preopens: {t}", .{err});
+        std.debug.panic("failed to init preopens: {t}", .{err});
 
     return wrapMain(user.main(std.process.Init{
         .minimal = .{
