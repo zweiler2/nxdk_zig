@@ -494,6 +494,10 @@ fn convertExeToXboxExeWithDep(
     output_path: []const u8,
     nxdk_dep: *std.Build.Dependency,
 ) !*std.Build.Step {
+    if (exe.root_module.link_libc == true) {
+        @panic("nxdk_zig is freestanding: link_libc must not be enabled. Use the pdclib instead.");
+    }
+
     const app_title: []const u8 = exe.name;
     const app_path: std.Build.LazyPath = exe.getEmittedBin();
 

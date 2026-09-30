@@ -1,6 +1,13 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const user = @import("user");
+const nxdk_hal = @import("nxdk_hal");
+
+comptime {
+    if (builtin.link_libc) {
+        @compileError("nxdk_zig targets are freestanding: link_libc must not be enabled. Use the pdclib instead.");
+    }
+}
 
 pub const panic = @import("panic.zig").panic;
 pub const std_options_debug_io = @import("debug_io.zig").debug_io;
