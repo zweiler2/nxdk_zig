@@ -37,7 +37,7 @@ pub extern fn CreateFileA(
     dwDesiredAccess: xboxkrnl.xboxdef.DWORD,
     dwShareMode: xboxkrnl.xboxdef.DWORD,
     lpSecurityAttributes: ?winbase.LPSECURITY_ATTRIBUTES,
-    dwCreationDisposition: xboxkrnl.xboxdef.DWORD,
+    dwCreationDisposition: FILE_CREATION_DISPOSITION,
     dwFlagsAndAttributes: xboxkrnl.xboxdef.DWORD,
     hTemplateFile: ?xboxkrnl.xboxdef.HANDLE,
 ) xboxkrnl.xboxdef.HANDLE;

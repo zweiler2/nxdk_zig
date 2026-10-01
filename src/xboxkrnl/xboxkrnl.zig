@@ -721,10 +721,10 @@ pub inline fn InitializeObjectAttributes(
 }
 
 pub inline fn ObDosDevicesDirectory() xboxdef.HANDLE {
-    return @ptrFromInt(-3);
+    return @ptrFromInt(@as(usize, @bitCast(@as(isize, -3))));
 }
 pub inline fn ObWin32NamedObjectsDirectory() xboxdef.HANDLE {
-    return @ptrFromInt(-4);
+    return @ptrFromInt(@as(usize, @bitCast(@as(isize, -4))));
 }
 
 pub const _EVENT_TYPE = enum(c_int) {
@@ -3247,7 +3247,7 @@ pub extern fn ObOpenObjectByPointer(
 ) callconv(NTAPI) xboxdef.NTSTATUS;
 
 pub extern fn ObOpenObjectByName(
-    ObjectAttributes: POBJECT_ATTRIBUTES,
+    ObjectAttributes: *const OBJECT_ATTRIBUTES,
     ObjectType: POBJECT_TYPE,
     ParseContext: ?xboxdef.PVOID,
     Handle: xboxdef.PHANDLE,
@@ -3279,23 +3279,23 @@ pub extern fn NtYieldExecution() callconv(NTAPI) xboxdef.NTSTATUS;
 pub extern fn NtWriteFileGather(
     FileHandle: xboxdef.HANDLE,
     Event: ?xboxdef.HANDLE,
-    ApcRoutine: ?PIO_APC_ROUTINE,
+    ApcRoutine: ?*const PIO_APC_ROUTINE,
     ApcContext: ?xboxdef.PVOID,
     IoStatusBlock: PIO_STATUS_BLOCK,
     SegmentArray: PFILE_SEGMENT_ELEMENT,
     Length: xboxdef.ULONG,
-    ByteOffset: ?xboxdef.PLARGE_INTEGER,
+    ByteOffset: ?*const xboxdef.LARGE_INTEGER,
 ) callconv(NTAPI) xboxdef.BOOLEAN;
 
 pub extern fn NtWriteFile(
     FileHandle: xboxdef.HANDLE,
     Event: ?xboxdef.HANDLE,
-    ApcRoutine: ?PIO_APC_ROUTINE,
+    ApcRoutine: ?*const PIO_APC_ROUTINE,
     ApcContext: ?xboxdef.PVOID,
     IoStatusBlock: PIO_STATUS_BLOCK,
-    Buffer: xboxdef.PVOID,
+    Buffer: xboxdef.LPCVOID,
     Length: xboxdef.ULONG,
-    ByteOffset: ?xboxdef.PLARGE_INTEGER,
+    ByteOffset: ?*const xboxdef.LARGE_INTEGER,
 ) callconv(NTAPI) xboxdef.NTSTATUS;
 
 /// Waits until the specified object attains a state of "signaled". Also see NtWaitForSingleObject.
@@ -3509,23 +3509,23 @@ pub extern fn NtReleaseMutant(
 pub extern fn NtReadFileScatter(
     FileHandle: xboxdef.HANDLE,
     Event: ?xboxdef.HANDLE,
-    ApcRoutine: ?PIO_APC_ROUTINE,
+    ApcRoutine: ?*const PIO_APC_ROUTINE,
     ApcContext: ?xboxdef.PVOID,
     IoStatusBlock: PIO_STATUS_BLOCK,
     SegmentArray: PFILE_SEGMENT_ELEMENT,
     Length: xboxdef.ULONG,
-    ByteOffset: ?xboxdef.PLARGE_INTEGER,
+    ByteOffset: ?*const xboxdef.LARGE_INTEGER,
 ) callconv(NTAPI) xboxdef.NTSTATUS;
 
 pub extern fn NtReadFile(
     FileHandle: xboxdef.HANDLE,
     Event: ?xboxdef.HANDLE,
-    ApcRoutine: ?PIO_APC_ROUTINE,
+    ApcRoutine: ?*const PIO_APC_ROUTINE,
     ApcContext: ?xboxdef.PVOID,
     IoStatusBlock: PIO_STATUS_BLOCK,
     Buffer: xboxdef.PVOID,
     Length: xboxdef.ULONG,
-    ByteOffset: ?xboxdef.PLARGE_INTEGER,
+    ByteOffset: ?*const xboxdef.LARGE_INTEGER,
 ) callconv(NTAPI) xboxdef.NTSTATUS;
 
 pub extern fn NtQueueApcThread(
@@ -3598,7 +3598,7 @@ pub extern fn NtQueryInformationFile(
 ) callconv(NTAPI) xboxdef.NTSTATUS;
 
 pub extern fn NtQueryFullAttributesFile(
-    ObjectAttributes: POBJECT_ATTRIBUTES,
+    ObjectAttributes: *const OBJECT_ATTRIBUTES,
     FileInformation: PFILE_NETWORK_OPEN_INFORMATION,
 ) callconv(NTAPI) xboxdef.NTSTATUS;
 
@@ -3619,7 +3619,7 @@ pub extern fn NtQueryDirectoryObject(
 pub extern fn NtQueryDirectoryFile(
     FileHandle: xboxdef.HANDLE,
     Event: ?xboxdef.HANDLE,
-    ApcRoutine: ?PIO_APC_ROUTINE,
+    ApcRoutine: ?*const PIO_APC_ROUTINE,
     ApcContext: ?xboxdef.PVOID,
     IoStatusBlock: PIO_STATUS_BLOCK,
     FileInformation: xboxdef.PVOID,
@@ -3650,13 +3650,13 @@ pub extern fn NtProtectVirtualMemory(
 
 pub extern fn NtOpenSymbolicLinkObject(
     LinkHandle: xboxdef.PHANDLE,
-    ObjectAttributes: POBJECT_ATTRIBUTES,
+    ObjectAttributes: *const OBJECT_ATTRIBUTES,
 ) callconv(NTAPI) xboxdef.NTSTATUS;
 
 pub extern fn NtOpenFile(
     FileHandle: xboxdef.PHANDLE,
     DesiredAccess: ACCESS_MASK,
-    ObjectAttributes: POBJECT_ATTRIBUTES,
+    ObjectAttributes: *const OBJECT_ATTRIBUTES,
     IoStatusBlock: PIO_STATUS_BLOCK,
     ShareAccess: xboxdef.ULONG,
     OpenOptions: xboxdef.ULONG,
@@ -3664,7 +3664,7 @@ pub extern fn NtOpenFile(
 
 pub extern fn NtOpenDirectoryObject(
     DirectoryHandle: xboxdef.PHANDLE,
-    ObjectAttributes: POBJECT_ATTRIBUTES,
+    ObjectAttributes: *const OBJECT_ATTRIBUTES,
 ) callconv(NTAPI) xboxdef.NTSTATUS;
 
 pub inline fn CTL_CODE(DeviceType: u32, Function: u32, Method: u32, Access: u32) u32 {
@@ -3685,7 +3685,7 @@ pub const FSCTL_DISMOUNT_VOLUME = CTL_CODE(FILE_DEVICE_FILE_SYSTEM, 8, METHOD_BU
 pub extern fn NtFsControlFile(
     FileHandle: xboxdef.HANDLE,
     Event: ?xboxdef.HANDLE,
-    ApcRoutine: ?PIO_APC_ROUTINE,
+    ApcRoutine: ?*const PIO_APC_ROUTINE,
     ApcContext: ?xboxdef.PVOID,
     IoStatusBlock: PIO_STATUS_BLOCK,
     FsControlCode: xboxdef.ULONG,
@@ -3774,7 +3774,7 @@ pub const IOCTL_DISK_GET_PARTITION_INFO = CTL_CODE(IOCTL_DISK_BASE, 0x00_01, MET
 pub extern fn NtDeviceIoControlFile(
     FileHandle: xboxdef.HANDLE,
     Event: ?xboxdef.HANDLE,
-    ApcRoutine: ?PIO_APC_ROUTINE,
+    ApcRoutine: ?*const PIO_APC_ROUTINE,
     ApcContext: ?xboxdef.PVOID,
     IoStatusBlock: PIO_STATUS_BLOCK,
     IoControlCode: xboxdef.ULONG,
@@ -3785,12 +3785,12 @@ pub extern fn NtDeviceIoControlFile(
 ) callconv(NTAPI) xboxdef.NTSTATUS;
 
 pub extern fn NtDeleteFile(
-    ObjectAttributes: POBJECT_ATTRIBUTES,
+    ObjectAttributes: *const OBJECT_ATTRIBUTES,
 ) callconv(NTAPI) xboxdef.BOOLEAN;
 
 pub extern fn NtCreateTimer(
     TimerHandle: xboxdef.PHANDLE,
-    ObjectAttributes: POBJECT_ATTRIBUTES,
+    ObjectAttributes: *const OBJECT_ATTRIBUTES,
     TimerType: TIMER_TYPE,
 ) callconv(NTAPI) xboxdef.NTSTATUS;
 
@@ -3837,7 +3837,7 @@ pub extern fn NtCreateIoCompletion(
 pub extern fn NtCreateFile(
     FileHandle: xboxdef.PHANDLE,
     DesiredAccess: ACCESS_MASK,
-    ObjectAttributes: POBJECT_ATTRIBUTES,
+    ObjectAttributes: *const OBJECT_ATTRIBUTES,
     IoStatusBlock: PIO_STATUS_BLOCK,
     AllocationSize: ?xboxdef.PLARGE_INTEGER,
     FileAttributes: xboxdef.ULONG,
@@ -3984,7 +3984,7 @@ pub extern fn NtCreateEvent(
 
 pub extern fn NtCreateDirectoryObject(
     DirectoryHandle: xboxdef.PHANDLE,
-    ObjectAttributes: POBJECT_ATTRIBUTES,
+    ObjectAttributes: *const OBJECT_ATTRIBUTES,
 ) callconv(NTAPI) xboxdef.NTSTATUS;
 
 /// Closes an object handle.
