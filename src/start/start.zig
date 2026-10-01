@@ -10,6 +10,7 @@ comptime {
 }
 
 pub const panic = @import("panic.zig").panic;
+pub const std_options_cwd = @import("cwd.zig").cwdFn;
 pub const std_options_debug_io = @import("debug_io.zig").debug_io;
 pub const os = struct {
     pub const heap = struct {
