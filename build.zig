@@ -14,8 +14,24 @@ pub fn build(b: *std.Build) !void {
     const optimize = b.standardOptimizeOption(.{});
 
     const lto = b.option(std.zig.LtoMode, "lto", "LTO mode for the libraries/examples");
+    const automount_d = b.option(
+        bool,
+        "automount-d",
+        "Link nxdk's automount_d so the running XBE's directory is mounted as D: (default: true)",
+    ) orelse true;
 
     const nxdk_dep = b.dependency("nxdk", .{});
+    const automount_d_obj = if (automount_d)
+        buildAutomountDObject(
+            b,
+            target,
+            optimize,
+            lto,
+            nxdk_dep,
+            b.dependency("nxdk-pdclib", .{}),
+        )
+    else
+        null;
     const cxbe_exe = try buildCXBEBin(b, optimize, nxdk_dep);
     b.installArtifact(cxbe_exe);
 
@@ -76,6 +92,7 @@ pub fn build(b: *std.Build) !void {
         .optimize = optimize,
         .lto = lto,
         .lib_name = "libnxdk",
+        .exclude_c_names = &.{"automount_d.c"},
         .lib_deps = &.{
             .{
                 .name = "nxdk",
@@ -381,7 +398,7 @@ pub fn build(b: *std.Build) !void {
         "errors", "hello", "gamma", "gamma-fade", "led", "triangle",
     };
     for (examples) |name| {
-        try buildExample(b, optimize, example_step, name, lto, .{
+        try buildExample(b, optimize, example_step, name, lto, automount_d_obj, .{
             .pdclib = pdclib_mod,
             .nxdk = nxdk_mod,
             .xboxrt = xboxrt_mod,
@@ -403,7 +420,20 @@ pub fn createExe(
     /// NOTE: LTO on Debug builds disables `bundle_ubsan_rt`
     lto: ?std.zig.LtoMode,
 ) !*std.Build.Step.Compile {
-    return createExeWithModules(b, optimize, name, user_root_source_file, nxdk_zig_dep.path("src/start/start.zig"), lto, .{
+    // Resolve nxdk again through the nxdk_zig package so this works from any
+    // consumer build (external callers pass their own `b`, which does not
+    // necessarily declare nxdk or nxdk-pdclib).
+    const nxdk_dep = nxdk_zig_dep.builder.dependency("nxdk", .{});
+    const pdclib_dep = nxdk_zig_dep.builder.dependency("nxdk-pdclib", .{});
+    const automount_d = buildAutomountDObject(
+        b,
+        b.resolveTargetQuery(target_query),
+        optimize,
+        lto,
+        nxdk_dep,
+        pdclib_dep,
+    );
+    return createExeWithModules(b, optimize, name, user_root_source_file, nxdk_zig_dep.path("src/start/start.zig"), lto, automount_d, .{
         .pdclib = nxdk_zig_dep.module("pdclib"),
         .nxdk = nxdk_zig_dep.module("nxdk"),
         .xboxrt = nxdk_zig_dep.module("xboxrt"),
@@ -423,6 +453,10 @@ fn createExeWithModules(
     start_root_source_file: std.Build.LazyPath,
     /// NOTE: LTO on Debug builds disables `bundle_ubsan_rt`
     lto: ?std.zig.LtoMode,
+    /// The `lib/nxdk/automount_d.c` object, pre-built by the caller. When
+    /// non-null it is linked directly into the executable so its `.CRT$XIT`
+    /// initializer mounts the XBE's directory as `D:`. Null disables automount.
+    automount_d: ?*std.Build.Step.Compile,
     mods: struct {
         pdclib: *std.Build.Module,
         nxdk: *std.Build.Module,
@@ -434,9 +468,11 @@ fn createExeWithModules(
         pbkit: *std.Build.Module,
     },
 ) !*std.Build.Step.Compile {
+    const target = b.resolveTargetQuery(target_query);
+
     const user_mod = b.createModule(.{
         .root_source_file = user_root_source_file,
-        .target = b.resolveTargetQuery(target_query),
+        .target = target,
         .optimize = optimize,
         .imports = &.{
             .{ .name = "winapi", .module = mods.winapi },
@@ -454,7 +490,7 @@ fn createExeWithModules(
         .name = name,
         .root_module = b.createModule(.{
             .root_source_file = start_root_source_file,
-            .target = b.resolveTargetQuery(target_query),
+            .target = target,
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "user", .module = user_mod },
@@ -479,6 +515,10 @@ fn createExeWithModules(
     exe.subsystem = .windows;
     exe.entry = .{ .symbol_name = "WinMainCRTStartup" };
     exe.root_module.single_threaded = true;
+
+    if (automount_d) |obj| {
+        exe.root_module.addObject(obj);
+    }
 
     return exe;
 }
@@ -594,6 +634,59 @@ fn createXISOWithDep(
     return &install_xbe.step;
 }
 
+/// `lib/nxdk/automount_d.c` registers `automount_d_drive` as a `.CRT$XIT`
+/// initializer. Nothing references it, so a copy kept inside the
+/// `libnxdk.lib` archive is never extracted by the linker and its initializer
+/// never runs. Compiling it as a standalone object and linking that object
+/// directly into the executable guarantees the `.CRT$XIT` entry reaches the
+/// image (the equivalent of nxdk's `-include:_automount_d_drive`).
+///
+/// The built object is a single shared compile step; it can be attached to any
+/// number of executables with `Module.addObject`. Include paths mirror the set
+/// used to build `libnxdk.lib` (nxdk + nxdk-pdclib).
+fn buildAutomountDObject(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    lto: ?std.zig.LtoMode,
+    nxdk_dep: *std.Build.Dependency,
+    pdclib_dep: *std.Build.Dependency,
+) *std.Build.Step.Compile {
+    const obj = b.addObject(.{
+        .name = "nxdk_automount_d",
+        .root_module = b.createModule(.{
+            .target = target,
+            .optimize = optimize,
+            .sanitize_c = .off,
+        }),
+    });
+    obj.lto = lto;
+
+    for ([_][]const u8{
+        "lib",
+        "lib/nxdk",
+        "lib/winapi",
+        "lib/net/nforceif/include",
+        "lib/xboxrt/vcruntime",
+    }) |path| {
+        obj.root_module.addIncludePath(nxdk_dep.path(path));
+    }
+    for ([_][]const u8{
+        "platform/xbox/include",
+        "include",
+    }) |path| {
+        obj.root_module.addIncludePath(pdclib_dep.path(path));
+    }
+
+    obj.root_module.addCSourceFile(.{
+        .language = .c,
+        .file = nxdk_dep.path("lib/nxdk/automount_d.c"),
+        .flags = c_flags,
+    });
+
+    return obj;
+}
+
 fn buildLib(info: LibInfo) !*std.Build.Step.Compile {
     const lib = info.b.addLibrary(.{
         .name = info.lib_name,
@@ -622,12 +715,12 @@ fn buildLib(info: LibInfo) !*std.Build.Step.Compile {
 
         if (lib_dep.walker_paths) |paths| {
             for (paths) |path| {
-                try gatherCFilesWalker(info.b, dep, path, lib, null);
+                try gatherCFilesWalker(info.b, dep, path, lib, null, info.exclude_c_names);
             }
         }
         if (lib_dep.iter_paths) |paths| {
             for (paths) |path| {
-                try gatherCFilesIter(info.b, dep, path, lib, null);
+                try gatherCFilesIter(info.b, dep, path, lib, null, info.exclude_c_names);
             }
         }
     }
@@ -696,9 +789,18 @@ fn buildExtractXISOBin(b: *std.Build, optimize: std.builtin.OptimizeMode, extrac
             .freebsd => "-D__FREEBSD__",
             else => "",
         },
-    });
+    }, &.{});
 
     return exe;
+}
+
+fn isExcludedCName(name: []const u8, exclude_c_names: []const []const u8) bool {
+    for (exclude_c_names) |excluded| {
+        if (std.mem.eql(u8, name, excluded)) {
+            return true;
+        }
+    }
+    return false;
 }
 
 fn gatherCFilesWalker(
@@ -707,6 +809,7 @@ fn gatherCFilesWalker(
     path: []const u8,
     lib: *std.Build.Step.Compile,
     custom_flags: ?[]const []const u8,
+    exclude_c_names: []const []const u8,
 ) !void {
     const dep_path = try dep.path(path).getPath4(b, null);
     var dir = try dep_path.openDir(b.graph.io, ".", .{ .iterate = true });
@@ -716,6 +819,9 @@ fn gatherCFilesWalker(
     defer walker.deinit();
     while (try walker.next(b.graph.io)) |entry| {
         if (entry.kind != .file) {
+            continue;
+        }
+        if (isExcludedCName(entry.basename, exclude_c_names)) {
             continue;
         }
 
@@ -744,6 +850,7 @@ fn gatherCFilesIter(
     path: []const u8,
     lib: *std.Build.Step.Compile,
     custom_flags: ?[]const []const u8,
+    exclude_c_names: []const []const u8,
 ) !void {
     const dep_path = try dep.path(path).getPath4(b, null);
     var dir = try dep_path.openDir(b.graph.io, ".", .{ .iterate = true });
@@ -752,6 +859,9 @@ fn gatherCFilesIter(
     var iter = dir.iterate();
     while (try iter.next(b.graph.io)) |entry| {
         if (entry.kind != .file) {
+            continue;
+        }
+        if (isExcludedCName(entry.name, exclude_c_names)) {
             continue;
         }
 
@@ -816,6 +926,7 @@ fn buildExample(
     example_step: *std.Build.Step,
     name: []const u8,
     lto: ?std.zig.LtoMode,
+    automount_d: ?*std.Build.Step.Compile,
     mods: struct {
         pdclib: *std.Build.Module,
         nxdk: *std.Build.Module,
@@ -834,6 +945,7 @@ fn buildExample(
         b.path(b.fmt("examples/{s}/main.zig", .{name})),
         b.path("src/start/start.zig"),
         lto,
+        automount_d,
         .{
             .pdclib = mods.pdclib,
             .nxdk = mods.nxdk,
@@ -888,6 +1000,10 @@ const LibInfo = struct {
     /// NOTE: LTO on Debug builds disables `bundle_ubsan_rt`
     lto: ?std.zig.LtoMode,
     lib_name: []const u8,
+    /// C source basenames to skip while gathering `lib_deps` paths. Used to keep
+    /// `automount_d.c` out of `libnxdk.lib`, since that object must be linked
+    /// directly into each executable (see `buildAutomountDObject`).
+    exclude_c_names: []const []const u8 = &.{},
     lib_deps: []const struct {
         name: []const u8,
         include_paths: []const []const u8,
