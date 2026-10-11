@@ -159,7 +159,6 @@ pub fn main() !void {
     xboxkrnl.xboxkrnl.MmFreeContiguousMemory(alloc_vertices);
     pbkit.pbkit.pb_show_debug_screen();
     pbkit.pbkit.pb_kill();
-    return 0;
 }
 
 /// Construct a viewport transformation matrix

@@ -1,5 +1,6 @@
 const std = @import("std");
 const winapi = @import("winapi");
+const nxdk_hal = @import("nxdk_hal");
 const xboxkrnl = @import("xboxkrnl");
 
 pub const debug_io: std.Io = .{
@@ -32,11 +33,55 @@ const DebugIo = struct {
     stderr_writer_initialized: bool = false,
 };
 
+const console_vtable: std.Io.Writer.VTable = .{
+    .drain = consoleDrain,
+};
+
+fn consoleDrain(w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
+    const header: []u8 = w.buffered();
+    if (header.len != 0) {
+        consoleWrite(header);
+    }
+    _ = w.consumeAll();
+
+    var consumed: usize = 0;
+    for (data[0 .. data.len - 1]) |chunk| {
+        consoleWrite(chunk);
+        consumed += chunk.len;
+    }
+    const pattern = data[data.len - 1];
+    for (0..splat) |_| {
+        consoleWrite(pattern);
+        consumed += pattern.len;
+    }
+
+    return consumed;
+}
+
+fn consoleWrite(bytes: []const u8) void {
+    const static = struct {
+        const console_chunk_len = 256;
+        pub var console_scratch: [console_chunk_len + 1]u8 = undefined;
+    };
+    var rest: []const u8 = bytes;
+    while (rest.len != 0) {
+        const n = @min(rest.len, static.console_chunk_len);
+        @memcpy(static.console_scratch[0..n], rest[0..n]);
+        static.console_scratch[n] = 0;
+        const cstr: [*c]const u8 = @ptrCast(&static.console_scratch);
+        if (nxdk_hal.video.XVideoGetFB() != null) {
+            nxdk_hal.debug.debugPrint("%s", cstr);
+        }
+        _ = xboxkrnl.xboxkrnl.DbgPrint("%s", cstr);
+        rest = rest[n..];
+    }
+}
+
 fn lockStderr(userdata: ?*anyopaque, _: ?std.Io.Terminal.Mode) std.Io.Cancelable!std.Io.LockedStderr {
     const self: *DebugIo = @ptrCast(@alignCast(userdata.?));
     if (!self.stderr_writer_initialized) {
-        self.stderr_writer.file = std.Io.File.stderr();
         self.stderr_writer.io = debug_io;
+        self.stderr_writer.interface.vtable = &console_vtable;
         self.stderr_writer_initialized = true;
     }
     return .{
@@ -136,14 +181,14 @@ fn dirCreateFile(
         return error.IsDir;
     }
 
-    var path_buffer: [std.Io.Dir.max_path_bytes:0]u8 = undefined;
+    var path_buffer: [winapi.windef.MAX_PATH:0]u8 = undefined;
     if (sub_path.len == 0 or sub_path.len >= path_buffer.len) {
         return if (sub_path.len == 0)
             error.BadPathName
         else
             error.NameTooLong;
     }
-    @memcpy(&path_buffer, sub_path);
+    @memcpy(path_buffer[0..sub_path.len], sub_path);
     path_buffer[sub_path.len] = 0;
 
     var ansi_path: xboxkrnl.xboxdef.ANSI_STRING = undefined;
@@ -218,11 +263,11 @@ fn dirOpenFile(
         }
     }
 
-    var path_buffer: [std.Io.Dir.max_path_bytes:0]u8 = undefined;
+    var path_buffer: [winapi.windef.MAX_PATH:0]u8 = undefined;
     if (sub_path.len == 0 or sub_path.len >= path_buffer.len) {
         return if (sub_path.len == 0) error.BadPathName else error.NameTooLong;
     }
-    @memcpy(&path_buffer, sub_path);
+    @memcpy(path_buffer[0..sub_path.len], sub_path);
     path_buffer[sub_path.len] = 0;
 
     var ansi_path: xboxkrnl.xboxdef.ANSI_STRING = undefined;

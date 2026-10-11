@@ -237,6 +237,4 @@ pub fn main() !void {
     }
 
     // Unreachable
-
-    return 0;
 }

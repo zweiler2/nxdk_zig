@@ -12,5 +12,5 @@ pub fn main() !void {
         winapi.synchapi.Sleep(1000);
     }
 
-    return 0;
+    // Unreachable
 }

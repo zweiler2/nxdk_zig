@@ -376,9 +376,9 @@ pub fn build(b: *std.Build) !void {
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_mod_tests.step);
 
-    const example_step = b.step("examples", "Build the examples");
+    const example_step = b.step("examples", "Build all examples");
     const examples: []const []const u8 = &.{
-        "hello", "gamma", "gamma-fade", "led", "triangle",
+        "errors", "hello", "gamma", "gamma-fade", "led", "triangle",
     };
     for (examples) |name| {
         try buildExample(b, optimize, example_step, name, lto, .{
@@ -474,8 +474,8 @@ fn createExeWithModules(
         exe.bundle_ubsan_rt = false;
     }
     exe.lto = lto;
-    exe.image_base = 0x0001_0000;
-    exe.stack_size = 65536;
+    exe.image_base = 0x00_01_00_00;
+    exe.stack_size = 0x100000;
     exe.subsystem = .windows;
     exe.entry = .{ .symbol_name = "WinMainCRTStartup" };
     exe.root_module.single_threaded = true;
@@ -870,6 +870,15 @@ fn buildExample(
     );
 
     example_step.dependOn(create_xiso);
+
+    const run_cmd = b.addSystemCommand(&.{
+        "xemu",
+        "-dvd_path",
+        b.getInstallPath(.{ .custom = "examples" }, b.fmt("{s}.iso", .{name})),
+    });
+    run_cmd.step.dependOn(example_step);
+    const run_step = b.step(b.fmt("run-{s}", .{name}), b.fmt("Build all examples and Run the '{s}' example", .{name}));
+    run_step.dependOn(&run_cmd.step);
 }
 
 const LibInfo = struct {

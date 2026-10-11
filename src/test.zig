@@ -1,6 +1,5 @@
 pub const hal = @import("hal/root.zig");
 pub const nxdk = @import("nxdk/root.zig");
-pub const overrides = @import("overrides/root.zig");
 pub const pbkit = @import("pbkit/root.zig");
 pub const pdclib = @import("pdclib/root.zig");
 pub const winapi = @import("winapi/root.zig");

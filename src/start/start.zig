@@ -1,7 +1,8 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const user = @import("user");
-const nxdk_hal = @import("nxdk_hal");
+const fault = @import("fault.zig");
+const xboxrt = @import("xboxrt");
 
 comptime {
     if (builtin.link_libc) {
@@ -22,9 +23,35 @@ pub const debug = struct {
     pub fn getDebugInfoAllocator() std.mem.Allocator {
         return os.heap.page_allocator;
     }
+    /// `std.debug.printLineInfo` shows the source line under each
+    /// `file:line:col: 0x… in function` frame by reading the file named in the
+    /// PDB — an absolute path on the *build host*, which the console can never
+    /// reach. Fail immediately so the frame still prints without the snippet
+    /// instead of attempting a doomed filesystem open from the panic handler.
+    pub fn printLineFromFile(
+        io: std.Io,
+        writer: *std.Io.Writer,
+        source_location: std.debug.SourceLocation,
+    ) error{FileNotFound}!void {
+        _ = .{ io, writer, source_location };
+        return error.FileNotFound;
+    }
 };
 
 pub export fn main() u8 {
+    // Catch hardware faults (#PF on a bad dereference, illegal instruction, …)
+    // through our own `%fs:0` SEH frame before anything else runs. NOTE: we
+    // deliberately do NOT call `std.debug.maybeEnableSegfaultHandler()` — it
+    // registers via `RtlAddVectoredExceptionHandler`, an ntdll.dll import the
+    // Xbox kernel cannot bind: on xemu the thunk lands on a null/garbage IAT
+    // entry and calling it faults the boot path before any output can be
+    // rendered (black screen). The kernel also exports no registration API of
+    // its own, so `fault.zig` hooks the only place it does honor: the classic
+    // x86 SEH chain at `fs:[0]`. The dead `std.start` `wWinMainCRTStartup`
+    // keeps the ntdll import alive in the binary, but it must never be called.
+    var fault_reg: xboxrt.vcruntime.excpt.EXCEPTION_REGISTRATION = undefined;
+    fault.install(&fault_reg);
+
     const fn_info = @typeInfo(@TypeOf(user.main)).@"fn";
     if (fn_info.params.len == 0) {
         return wrapMain(user.main());
@@ -78,7 +105,9 @@ inline fn wrapMain(result: anytype) u8 {
         u8 => return result,
         else => {},
     }
-    if (@typeInfo(ReturnType) != .error_union) @compileError(bad_main_ret);
+    if (@typeInfo(ReturnType) != .error_union) {
+        @compileError(bad_main_ret);
+    }
 
     const unwrapped_result = result catch |err| {
         std.log.err("{t}", .{err});

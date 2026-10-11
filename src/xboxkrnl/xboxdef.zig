@@ -1,4 +1,4 @@
-const std = @import("std");
+const xboxkrnl = @import("xboxkrnl.zig");
 
 pub const LPCVOID = *const anyopaque;
 pub const VOID = void;
@@ -7,8 +7,8 @@ pub const LPVOID = *anyopaque;
 pub const HANDLE = PVOID;
 pub const PHANDLE = *PVOID;
 
-pub fn NtCurrentThread() HANDLE {
-    return @import("std").zig.c_translation.helpers.cast(HANDLE, -@as(c_int, 2));
+pub inline fn NtCurrentThread() HANDLE {
+    return @ptrFromInt(@as(usize, @bitCast(@as(isize, -2))));
 }
 
 pub const BOOLEAN = u8;
@@ -146,7 +146,7 @@ pub const PEXCEPTION_RECORD = *_EXCEPTION_RECORD;
 pub const _STRING = extern struct {
     Length: USHORT,
     MaximumLength: USHORT,
-    Buffer: ?PCHAR,
+    Buffer: xboxkrnl.PSZ,
 };
 pub const STRING = _STRING;
 pub const PSTRING = *_STRING;

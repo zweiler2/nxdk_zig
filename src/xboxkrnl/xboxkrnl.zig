@@ -666,7 +666,7 @@ pub const PFILE_TRACKING_INFORMATION = *_FILE_TRACKING_INFORMATION;
 
 /// Object Attributes Structure
 pub const _OBJECT_ATTRIBUTES = extern struct {
-    RootDirectory: xboxdef.HANDLE, // Optional handle to the root object directory for the path name specified by the ObjectName member. If RootDirectory is NULL, ObjectName must point to a fully qualified object name that includes the full path to the target object. If RootDirectory is non-NULL, ObjectName specifies an object name relative to the RootDirectory directory.
+    RootDirectory: ?xboxdef.HANDLE, // Optional handle to the root object directory for the path name specified by the ObjectName member. If RootDirectory is NULL, ObjectName must point to a fully qualified object name that includes the full path to the target object. If RootDirectory is non-NULL, ObjectName specifies an object name relative to the RootDirectory directory.
     ObjectName: xboxdef.PANSI_STRING, // Pointer to an ANSI string that contains the name of the object for which a handle is to be opened. This must either be a fully qualified object name, or a relative path name to the directory specified by the RootDirectory member.
     Attributes: xboxdef.ULONG, // Bitmask of flags that specify object handle attributes.
 };
@@ -2402,7 +2402,12 @@ pub extern fn XeUnloadSection(
     Section: xboxdef.PXBE_SECTION_HEADER,
 ) callconv(NTAPI) xboxdef.NTSTATUS;
 
-pub extern var XePublicKeyData: xboxdef.UCHAR[284];
+pub inline fn XePublicKeyData() *const [284]xboxdef.UCHAR {
+    return @extern(*const [284]xboxdef.UCHAR, .{
+        .name = "XePublicKeyData",
+        .is_dll_import = true,
+    });
+}
 
 /// Loads the supplied section into memory or increases its reference count if it's already loaded.
 ///
@@ -2413,7 +2418,12 @@ pub extern fn XeLoadSection(
     Section: xboxdef.PXBE_SECTION_HEADER,
 ) callconv(NTAPI) xboxdef.NTSTATUS;
 
-pub extern var XeImageFileName: xboxdef.ANSI_STRING[1];
+pub inline fn XeImageFileName() *const xboxdef.ANSI_STRING {
+    return @extern(*const xboxdef.ANSI_STRING, .{
+        .name = "XeImageFileName",
+        .is_dll_import = true,
+    });
+}
 
 pub extern fn XcVerifyPKCS1Signature(
     pbSig: xboxdef.PUCHAR,
@@ -2536,19 +2546,54 @@ pub extern fn XcBlockCrypt(
     dwOp: xboxdef.ULONG,
 ) callconv(NTAPI) xboxdef.VOID;
 
-pub extern var XboxSignatureKey: XBOX_KEY_DATA;
+pub inline fn XboxSignatureKey() *const XBOX_KEY_DATA {
+    return @extern(*const XBOX_KEY_DATA, .{
+        .name = "XboxSignatureKey",
+        .is_dll_import = true,
+    });
+}
 
-pub extern var XboxLANKey: XBOX_KEY_DATA;
+pub inline fn XboxLANKey() *const XBOX_KEY_DATA {
+    return @extern(*const XBOX_KEY_DATA, .{
+        .name = "XboxLANKey",
+        .is_dll_import = true,
+    });
+}
 
-pub extern var XboxKrnlVersion: XBOX_KRNL_VERSION;
+pub inline fn XboxKrnlVersion() *const XBOX_KRNL_VERSION {
+    return @extern(*const XBOX_KRNL_VERSION, .{
+        .name = "XboxKrnlVersion",
+        .is_dll_import = true,
+    });
+}
 
-pub extern var XboxHardwareInfo: XBOX_HARDWARE_INFO;
+pub inline fn XboxHardwareInfo() *const XBOX_HARDWARE_INFO {
+    return @extern(*const XBOX_HARDWARE_INFO, .{
+        .name = "XboxHardwareInfo",
+        .is_dll_import = true,
+    });
+}
 
-pub extern var XboxHDKey: XBOX_KEY_DATA;
+pub inline fn XboxHDKey() *const XBOX_KEY_DATA {
+    return @extern(*const XBOX_KEY_DATA, .{
+        .name = "XboxHDKey",
+        .is_dll_import = true,
+    });
+}
 
-pub extern var XboxEEPROMKey: XBOX_KEY_DATA;
+pub inline fn XboxEEPROMKey() *const XBOX_KEY_DATA {
+    return @extern(*const XBOX_KEY_DATA, .{
+        .name = "XboxHDKey",
+        .is_dll_import = true,
+    });
+}
 
-pub extern var XboxAlternateSignatureKeys: [*c]XBOX_KEY_DATA;
+pub inline fn XboxAlternateSignatureKeys() *const [*]const XBOX_KEY_DATA {
+    return @extern(*const [*]const XBOX_KEY_DATA, .{
+        .name = "XboxAlternateSignatureKeys",
+        .is_dll_import = true,
+    });
+}
 
 /// Writes a number of USHORT values from the specified port address into a buffer.
 ///
@@ -3156,7 +3201,12 @@ pub extern fn READ_PORT_BUFFER_UCHAR(
     Count: xboxdef.ULONG,
 ) callconv(NTAPI) xboxdef.VOID;
 
-pub extern var PsThreadObjectType: OBJECT_TYPE;
+pub inline fn PsThreadObjectType() *const OBJECT_TYPE {
+    return @extern(*const OBJECT_TYPE, .{
+        .name = "PsThreadObjectType",
+        .is_dll_import = true,
+    });
+}
 
 pub extern fn PsTerminateSystemThread(
     ExitStatus: xboxdef.NTSTATUS,
@@ -3218,8 +3268,18 @@ pub extern fn PhyGetLinkState(
     update: xboxdef.BOOLEAN,
 ) callconv(NTAPI) xboxdef.DWORD;
 
-pub extern var ObpObjectHandleTable: OBJECT_HANDLE_TABLE;
-pub extern var ObSymbolicLinkObjectType: OBJECT_TYPE;
+pub inline fn ObpObjectHandleTable() *const OBJECT_HANDLE_TABLE {
+    return @extern(*const OBJECT_HANDLE_TABLE, .{
+        .name = "ObpObjectHandleTable",
+        .is_dll_import = true,
+    });
+}
+pub inline fn ObSymbolicLinkObjectType() *const OBJECT_TYPE {
+    return @extern(*const OBJECT_TYPE, .{
+        .name = "ObSymbolicLinkObjectType",
+        .is_dll_import = true,
+    });
+}
 
 pub extern fn ObReferenceObjectByPointer(
     Object: xboxdef.PVOID,
@@ -3264,7 +3324,12 @@ pub extern fn ObInsertObject(
     Handle: xboxdef.PHANDLE,
 ) callconv(NTAPI) xboxdef.NTSTATUS;
 
-pub extern var ObDirectoryObjectType: OBJECT_TYPE;
+pub inline fn ObDirectoryObjectType() *const OBJECT_TYPE {
+    return @extern(*const OBJECT_TYPE, .{
+        .name = "ObDirectoryObjectType",
+        .is_dll_import = true,
+    });
+}
 
 pub extern fn ObCreateObject(
     ObjectType: POBJECT_TYPE,
@@ -4107,7 +4172,12 @@ pub extern fn MmIsAddressValid(
     VirtualAddress: xboxdef.PVOID,
 ) callconv(NTAPI) xboxdef.BOOLEAN;
 
-pub extern var MmGlobalData: MMGLOBALDATA;
+pub inline fn MmGlobalData() *const MMGLOBALDATA {
+    return @extern(*const MMGLOBALDATA, .{
+        .name = "MmGlobalData",
+        .is_dll_import = true,
+    });
+}
 
 /// Returns the physical address for a virtual address.
 ///
@@ -4181,9 +4251,19 @@ pub extern fn MmAllocateContiguousMemory(
     NumberOfBytes: xboxdef.SIZE_T,
 ) callconv(NTAPI) xboxdef.PVOID;
 
-pub extern var LaunchDataPage: PLAUNCH_DATA_PAGE;
+pub inline fn LaunchDataPage() *const PLAUNCH_DATA_PAGE {
+    return @extern(*const PLAUNCH_DATA_PAGE, .{
+        .name = "LaunchDataPage",
+        .is_dll_import = true,
+    });
+}
 
-pub extern var KiBugCheckData: [*c]xboxdef.ULONG;
+pub inline fn KiBugCheckData() *const [*]const xboxdef.ULONG {
+    return @extern(*const [*]const xboxdef.ULONG, .{
+        .name = "KiBugCheckData",
+        .is_dll_import = true,
+    });
+}
 
 pub extern fn KeWaitForSingleObject(
     Object: xboxdef.PVOID,
@@ -4203,5 +4283,14 @@ pub extern fn KeWaitForMultipleObjects(
     Timeout: ?xboxdef.PLARGE_INTEGER,
     WaitBlockArray: PKWAIT_BLOCK,
 ) callconv(NTAPI) xboxdef.NTSTATUS;
+
+/// "printf"-style output function for the kernel debugger.
+///
+/// @param Format "printf"-style format string
+///
+/// @param ... Arguments matching the format string.
+///
+/// @return A status-code.
+pub extern fn DbgPrint(Format: [*c]const u8, ...) callconv(CDECL) xboxdef.ULONG;
 
 // TODO: Finish defining the rest.

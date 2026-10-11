@@ -1,46 +1,25 @@
 const std = @import("std");
-const builtin = @import("builtin");
-
-const native_endian = builtin.target.cpu.arch.endian();
-const load_dll_notification_procs = builtin.abi == .msvc and switch (builtin.zig_backend) {
-    .stage2_c => true,
-    else => switch (builtin.output_mode) {
-        .Exe => false,
-        .Lib => switch (builtin.link_mode) {
-            .static => true,
-            .dynamic => false,
-        },
-        .Obj => true,
-    },
-};
+const nxdk_hal = @import("nxdk_hal");
+const xboxkrnl = @import("xboxkrnl");
+const winapi = @import("winapi");
 
 const SelfInfo = @This();
 
-lock: std.Io.RwLock,
-ntdll_handle: ?if (load_dll_notification_procs) *anyopaque else noreturn,
-notification_cookie: ?std.os.windows.LDR.DLL_NOTIFICATION.COOKIE,
-modules: std.ArrayList(Module),
+debug_info: ?(std.debug.SelfInfoError!DebugInfo),
+
+/// x86 has no unwinder on NXDK (`RtlVirtualUnwind` does not exist, and
+/// `RtlCaptureStackBackTrace` only walks EBP chains, which release builds do not
+/// necessarily maintain). NXDK is single threaded, so there is no such thing as a
+/// foreign stack to unwind into anyway; stack traces are limited to the panic address.
+pub const can_unwind: bool = false;
 
 pub const init: SelfInfo = .{
-    .lock = .init,
-    .ntdll_handle = null,
-    .notification_cookie = null,
-    .modules = .empty,
+    .debug_info = null,
 };
+
 pub fn deinit(si: *SelfInfo, io: std.Io) void {
     const gpa = std.debug.getDebugInfoAllocator();
-    if (si.notification_cookie) |cookie| unregister: {
-        switch ((si.getNtdllProc(.LdrUnregisterDllNotification) catch break :unregister)(cookie)) {
-            .SUCCESS => {},
-            else => |status| std.os.windows.unexpectedStatus(status) catch break :unregister,
-        }
-    }
-    if (si.ntdll_handle) |handle| switch (std.os.windows.ntdll.LdrUnloadDll(handle)) {
-        .SUCCESS => {},
-        else => |status| std.os.windows.unexpectedStatus(status) catch {},
-    };
-    for (si.modules.items) |*module| module.deinit(gpa, io);
-    si.modules.deinit(gpa);
+    if (si.debug_info) |di_or_err| if (di_or_err) |*di| di.deinit(gpa, io) else |_| {};
 }
 
 pub fn getSymbols(
@@ -52,682 +31,454 @@ pub fn getSymbols(
     resolve_inline_callers: bool,
     symbols: *std.ArrayList(std.debug.Symbol),
 ) std.debug.SelfInfoError!void {
-    const gpa = std.debug.getDebugInfoAllocator();
-    try si.lock.lockShared(io);
-    defer si.lock.unlockShared(io);
-    const module = try si.findModule(gpa, address);
-    const di = try module.getDebugInfo(gpa, io);
-    return di.getSymbols(
+    // The image is mapped where `base_address` says it is, so the slide is zero and
+    // the PDB addresses line up with the image as loaded. `offset` (the RVA) is only
+    // for the bounds check below: `DebugInfo.getSymbols` expects the absolute VMA and
+    // does the `- base_address` conversion itself -- handing it an already-converted
+    // RVA subtracts the base twice and shifts every lookup deeper into the image
+    // (e.g. a panic site in main.zig resolving to a function 64KB earlier).
+    const header = xbeHeader();
+    const offset = address -| header.base_address;
+    if (offset >= header.size_of_image) return error.MissingDebugInfo;
+
+    return (try si.getDebugInfo(io)).getSymbols(
         symbol_allocator,
         text_arena,
-        address - @intFromPtr(module.entry.DllBase),
+        address,
         resolve_inline_callers,
         symbols,
     );
 }
 
+/// The XBE is installed as `default.xbe` in the root of the generated ISO, and nothing
+/// on NXDK reports the name of the running image, so this is simply what we know it to
+/// be called.
 pub fn getModuleName(si: *SelfInfo, io: std.Io, address: usize) std.debug.SelfInfoError![]const u8 {
-    const gpa = std.debug.getDebugInfoAllocator();
-    try si.lock.lockShared(io);
-    defer si.lock.unlockShared(io);
-    const module = try si.findModule(gpa, address);
-    return module.name orelse {
-        const name = try std.unicode.wtf16LeToWtf8Alloc(gpa, module.entry.BaseDllName.slice());
-        module.name = name;
-        return name;
-    };
+    _ = .{ si, io, address };
+    return "default.xbe";
 }
+
+/// `cxbe` refuses any image base other than 0x10000, which is also where the kernel
+/// maps the XBE, so there is never a slide.
 pub fn getModuleSlide(si: *SelfInfo, io: std.Io, address: usize) std.debug.SelfInfoError!usize {
+    _ = .{ si, io, address };
+    return 0;
+}
+
+/// Loads (cached) the debug info for the running image on first use; every
+/// caller here reaches it through `getSymbols`.
+pub fn getDebugInfo(si: *SelfInfo, io: std.Io) std.debug.SelfInfoError!*DebugInfo {
+    if (si.debug_info == null) {
+        si.debug_info = loadDebugInfo(io);
+    }
+    return if (si.debug_info.?) |*di| di else |err| err;
+}
+
+fn loadDebugInfo(io: std.Io) std.debug.SelfInfoError!DebugInfo {
     const gpa = std.debug.getDebugInfoAllocator();
-    try si.lock.lockShared(io);
-    defer si.lock.unlockShared(io);
-    const module = try si.findModule(gpa, address);
-    return module.base_address;
-}
 
-pub const can_unwind: bool = switch (builtin.cpu.arch) {
-    else => true,
-    // On x86, `RtlVirtualUnwind` does not exist. We could in theory use `RtlCaptureStackBackTrace`
-    // instead, but on x86, it turns out that function is just... doing FP unwinding with esp! It's
-    // hard to find implementation details to confirm that, but the most authoritative source I have
-    // is an entry in the LLVM mailing list from 2020/08/16 which contains this quote:
-    //
-    // > x86 doesn't have what most architectures would consider an "unwinder" in the sense of
-    // > restoring registers; there is simply a linked list of frames that participate in SEH and
-    // > that desire to be called for a dynamic unwind operation, so RtlCaptureStackBackTrace
-    // > assumes that EBP-based frames are in use and walks an EBP-based frame chain on x86 - not
-    // > all x86 code is written with EBP-based frames so while even though we generally build the
-    // > OS that way, you might always run the risk of encountering external code that uses EBP as a
-    // > general purpose register for which such an unwind attempt for a stack trace would fail.
-    //
-    // Regardless, it's easy to effectively confirm this hypothesis just by compiling some code with
-    // `-fomit-frame-pointer -OReleaseFast` and observing that `RtlCaptureStackBackTrace` returns an
-    // empty trace when it's called in such an application. Note that without `-OReleaseFast` or
-    // similar, LLVM seems reluctant to ever clobber ebp, so you'll get a trace returned which just
-    // contains all of the kernel32/ntdll frames but none of your own. Don't be deceived---this is
-    // just coincidental!
-    //
-    // Anyway, the point is, the only stack walking primitive on x86-std.os.windows is FP unwinding. We
-    // *could* ask Microsoft to do that for us with `RtlCaptureStackBackTrace`... but better to just
-    // use our existing FP unwinder in `std.debug`!
-    .x86 => false,
-};
-pub const UnwindContext = struct {
-    pc: usize,
-    cur: std.os.windows.CONTEXT,
-    history_table: std.os.windows.UNWIND_HISTORY_TABLE,
-    pub fn init(ctx: *const std.debug.cpu_context.Native) UnwindContext {
-        return .{
-            .pc = @returnAddress(),
-            .cur = switch (builtin.cpu.arch) {
-                .x86_64 => std.mem.zeroInit(std.os.windows.CONTEXT, .{
-                    .Rax = ctx.gprs.get(.rax),
-                    .Rcx = ctx.gprs.get(.rcx),
-                    .Rdx = ctx.gprs.get(.rdx),
-                    .Rbx = ctx.gprs.get(.rbx),
-                    .Rsp = ctx.gprs.get(.rsp),
-                    .Rbp = ctx.gprs.get(.rbp),
-                    .Rsi = ctx.gprs.get(.rsi),
-                    .Rdi = ctx.gprs.get(.rdi),
-                    .R8 = ctx.gprs.get(.r8),
-                    .R9 = ctx.gprs.get(.r9),
-                    .R10 = ctx.gprs.get(.r10),
-                    .R11 = ctx.gprs.get(.r11),
-                    .R12 = ctx.gprs.get(.r12),
-                    .R13 = ctx.gprs.get(.r13),
-                    .R14 = ctx.gprs.get(.r14),
-                    .R15 = ctx.gprs.get(.r15),
-                    .Rip = ctx.gprs.get(.rip),
-                }),
-                .aarch64 => .{
-                    .ContextFlags = 0,
-                    .Cpsr = 0,
-                    .DUMMYUNIONNAME = .{ .X = ctx.x },
-                    .Sp = ctx.sp,
-                    .Pc = ctx.pc,
-                    .V = @splat(.{ .B = @splat(0) }),
-                    .Fpcr = 0,
-                    .Fpsr = 0,
-                    .Bcr = @splat(0),
-                    .Bvr = @splat(0),
-                    .Wcr = @splat(0),
-                    .Wvr = @splat(0),
-                },
-                .thumb => .{
-                    .ContextFlags = 0,
-                    .R0 = ctx.r[0],
-                    .R1 = ctx.r[1],
-                    .R2 = ctx.r[2],
-                    .R3 = ctx.r[3],
-                    .R4 = ctx.r[4],
-                    .R5 = ctx.r[5],
-                    .R6 = ctx.r[6],
-                    .R7 = ctx.r[7],
-                    .R8 = ctx.r[8],
-                    .R9 = ctx.r[9],
-                    .R10 = ctx.r[10],
-                    .R11 = ctx.r[11],
-                    .R12 = ctx.r[12],
-                    .Sp = ctx.r[13],
-                    .Lr = ctx.r[14],
-                    .Pc = ctx.r[15],
-                    .Cpsr = 0,
-                    .Fpcsr = 0,
-                    .Padding = 0,
-                    .DUMMYUNIONNAME = .{ .S = @splat(0) },
-                    .Bvr = @splat(0),
-                    .Bcr = @splat(0),
-                    .Wvr = @splat(0),
-                    .Wcr = @splat(0),
-                    .Padding2 = @splat(0),
-                },
-                else => comptime unreachable,
-            },
-            .history_table = std.mem.zeroes(std.os.windows.UNWIND_HISTORY_TABLE),
-        };
-    }
-    pub fn deinit(ctx: *UnwindContext) void {
-        _ = ctx;
-    }
-    pub fn getFp(ctx: *UnwindContext) usize {
-        return ctx.cur.getRegs().bp;
-    }
-};
-pub fn unwindFrame(si: *SelfInfo, io: std.Io, context: *UnwindContext) std.debug.SelfInfoError!usize {
-    _ = si;
-    _ = io;
+    // Deliberately not `std.debug.assert`: everything reachable from here runs inside
+    // the panic handler, and a failed assertion would re-enter it.
+    const header = xbeHeader();
+    if (header.magic != std.mem.readInt(u32, "XBEH", .little)) return error.MissingDebugInfo;
 
-    const current_regs = context.cur.getRegs();
-    var image_base: usize = undefined;
-    if (std.os.windows.ntdll.RtlLookupFunctionEntry(current_regs.ip, &image_base, &context.history_table)) |runtime_function| {
-        var handler_data: ?*anyopaque = null;
-        var establisher_frame: usize = undefined;
-        _ = std.os.windows.ntdll.RtlVirtualUnwind(
-            std.os.windows.UNW_FLAG_NHANDLER,
-            image_base,
-            current_regs.ip,
-            runtime_function,
-            &context.cur,
-            &handler_data,
-            &establisher_frame,
-            null,
-        );
-    } else {
-        // leaf function
-        context.cur.setIp(@as(*const usize, @ptrFromInt(current_regs.sp)).*);
-        context.cur.setSp(current_regs.sp + @sizeOf(usize));
-    }
+    const mapped = image();
+    const debug_path_offset = header.pe_debug_path -| header.base_address;
+    if (debug_path_offset >= mapped.len) return error.MissingDebugInfo;
+    const after_path = mapped[debug_path_offset..];
+    const terminator = std.mem.indexOfScalar(u8, after_path, 0) orelse return error.MissingDebugInfo;
+    const path = after_path[0..terminator];
+    if (path.len == 0) return error.MissingDebugInfo;
 
-    const next_regs = context.cur.getRegs();
-    const tib = &std.os.windows.teb().NtTib;
-    if (next_regs.sp < @intFromPtr(tib.StackLimit) or next_regs.sp > @intFromPtr(tib.StackBase)) {
-        context.pc = 0;
-        return 0;
-    }
-    // Like `DwarfUnwindContext.unwindFrame`, adjust our next lookup pc in case the `call` was this
-    // function's last instruction making `next_regs.ip` one byte past its end.
-    context.pc = next_regs.ip -| 1;
-    return next_regs.ip;
-}
+    const pdb_file = std.Io.Dir.cwd().openFile(io, path, .{}) catch |err| blk: {
+        if (err != error.FileNotFound and err != error.IsDir) return error.ReadFailed;
+        // `D:` is not yet a drive letter here (xemu at panic time mounts the DVD
+        // disc but not its DOS alias); fall back to the boot image's own device
+        // directory via `XeImageFileName`.
+        break :blk openPdbOnBootDevice(path) catch return error.MissingDebugInfo;
+    };
+    errdefer pdb_file.close(io);
 
-const Module = struct {
-    entry: *const std.os.windows.LDR.DATA_TABLE_ENTRY,
-    name: ?[]const u8,
-    di: ?(std.debug.SelfInfoError!DebugInfo),
+    var arena_instance: std.heap.ArenaAllocator = .init(gpa);
+    errdefer arena_instance.deinit();
+    const arena = arena_instance.allocator();
 
-    const DebugInfo = struct {
-        arena: std.heap.ArenaAllocator.State,
-        coff_image_base: u64,
-        mapped_file: ?MappedFile,
-        dwarf: ?std.debug.Dwarf,
-        pdb: ?std.debug.Pdb,
-        coff_section_headers: []std.coff.SectionHeader,
+    const pdb_reader = try arena.create(std.Io.File.Reader);
+    pdb_reader.* = pdb_file.reader(io, try arena.alloc(u8, 4096));
 
-        const MappedFile = struct {
-            file: std.Io.File,
-            section_handle: std.os.windows.HANDLE,
-            section_view: []const u8,
-            fn deinit(mf: *const MappedFile, io: std.Io) void {
-                const process_handle = std.os.windows.GetCurrentProcess();
-                switch (std.os.windows.ntdll.NtUnmapViewOfSection(
-                    process_handle,
-                    @constCast(mf.section_view.ptr),
-                )) {
-                    .SUCCESS => {},
-                    else => |status| std.os.windows.unexpectedStatus(status) catch {},
-                }
-                std.os.windows.CloseHandle(mf.section_handle);
-                mf.file.close(io);
-            }
-        };
+    var pdb = std.debug.Pdb.init(gpa, pdb_reader) catch |err| switch (err) {
+        error.OutOfMemory, error.ReadFailed, error.Unexpected => |e| return e,
+        else => return error.InvalidDebugInfo,
+    };
+    errdefer pdb.deinit();
+    pdb.parseInfoStream() catch |err| switch (err) {
+        error.UnknownPDBVersion => return error.UnsupportedDebugInfo,
+        error.EndOfStream => return error.InvalidDebugInfo,
 
-        fn deinit(di: *DebugInfo, gpa: std.mem.Allocator, io: std.Io) void {
-            if (di.dwarf) |*dwarf| dwarf.deinit(gpa);
-            if (di.pdb) |*pdb| {
-                pdb.file_reader.file.close(io);
-                pdb.deinit();
-            }
-            if (di.mapped_file) |*mf| mf.deinit(io);
+        error.InvalidDebugInfo,
+        error.MissingDebugInfo,
+        error.OutOfMemory,
+        error.ReadFailed,
+        => |e| return e,
+    };
+    pdb.parseDbiStream() catch |err| switch (err) {
+        error.UnknownPDBVersion => return error.UnsupportedDebugInfo,
 
-            var arena = di.arena.promote(gpa);
-            arena.deinit();
-        }
+        error.EndOfStream,
+        error.EOF,
+        error.StreamTooLong,
+        error.WriteFailed,
+        => return error.InvalidDebugInfo,
 
-        fn getSymbols(
-            di: *DebugInfo,
-            symbol_allocator: std.mem.Allocator,
-            text_arena: std.mem.Allocator,
-            vaddr: usize,
-            resolve_inline_callers: bool,
-            symbols: *std.ArrayList(std.debug.Symbol),
-        ) std.debug.SelfInfoError!void {
-            pdb: {
-                const pdb = &(di.pdb orelse break :pdb);
-                var coff_section: *align(1) const std.coff.SectionHeader = undefined;
-                const mod_index = for (pdb.sect_contribs) |sect_contrib| {
-                    if (sect_contrib.section > di.coff_section_headers.len) continue;
-                    // Remember that SectionContribEntry.Section is 1-based.
-                    coff_section = &di.coff_section_headers[sect_contrib.section - 1];
+        error.InvalidDebugInfo,
+        error.OutOfMemory,
+        error.ReadFailed,
+        => |e| return e,
+    };
+    pdb.parseIpiStream() catch |err| switch (err) {
+        error.UnknownPDBVersion => return error.UnsupportedDebugInfo,
 
-                    const vaddr_start = coff_section.virtual_address + sect_contrib.offset;
-                    const vaddr_end = vaddr_start + sect_contrib.size;
-                    if (vaddr >= vaddr_start and vaddr < vaddr_end) {
-                        break sect_contrib.module_index;
-                    }
-                } else {
-                    // we have no information to add to the address
-                    break :pdb;
-                };
-                const module = pdb.getModule(mod_index) catch |err| switch (err) {
-                    error.InvalidDebugInfo,
-                    error.MissingDebugInfo,
-                    error.OutOfMemory,
-                    => |e| return e,
+        error.EndOfStream,
+        => return error.InvalidDebugInfo,
 
-                    error.ReadFailed,
-                    error.EndOfStream,
-                    => return error.InvalidDebugInfo,
-                } orelse {
-                    return error.InvalidDebugInfo; // bad module index
-                };
-
-                const addr = vaddr - coff_section.virtual_address;
-                const maybe_proc = pdb.getProcSym(module, addr);
-                const compile_unit_name = std.fs.path.basename(module.obj_file_name);
-                const symbols_top = symbols.items.len;
-                if (maybe_proc) |proc| {
-                    const offset_in_func = addr - proc.code_offset;
-                    var last_inlinee: ?u32 = null;
-                    var iter = pdb.getInlinees(module, proc);
-                    while (iter.next(module)) |inline_site| {
-                        // Filter out duplicate inline sites. Tools like llvm-addr2line output
-                        // duplicate sites in the same cases as us if we elide this check,
-                        // implying that they exist in the underlying data and are not indicative
-                        // of a parser bug. No useful information is lost here since an inline site
-                        // can't actually reference itself.
-                        if (inline_site.inlinee == last_inlinee) continue;
-
-                        // If our address points into this site, get the source location(s) it
-                        // points at
-                        for (pdb.getInlineeSourceLines(
-                            module,
-                            inline_site.inlinee,
-                        )) |inlinee_src_line| {
-                            const maybe_loc = pdb.getInlineSiteSourceLocation(
-                                text_arena,
-                                module,
-                                inline_site,
-                                inlinee_src_line.info,
-                                offset_in_func,
-                            ) catch continue;
-                            const loc = maybe_loc orelse continue;
-
-                            // If we aren't trying to resolve inline callers, and we've matched a
-                            // new inline site, we want to overwrite the previously appended
-                            // results.
-                            if (!resolve_inline_callers and inline_site.inlinee != last_inlinee) {
-                                symbols.items.len = symbols_top;
-                            }
-
-                            // Only resolve the name if we're resolving inline callers, otherwise
-                            // wait until we're done to avoid duplicated work.
-                            const name = if (resolve_inline_callers)
-                                pdb.findInlineeName(inline_site.inlinee)
-                            else
-                                null;
-
-                            try symbols.append(symbol_allocator, .{
-                                .name = name,
-                                .compile_unit_name = compile_unit_name,
-                                .source_location = loc,
-                            });
-
-                            last_inlinee = inline_site.inlinee;
-                        }
-                    }
-
-                    if (resolve_inline_callers) {
-                        // Inline sites are stored in the pdb in reverse order, so we reverse the
-                        // matching sites here. We could alternatively use the parent fields to
-                        // determine the order, but this would introduce seemingly unecessary
-                        // complexity.
-                        std.mem.reverse(std.debug.Symbol, symbols.items);
-                    } else if (last_inlinee) |inlinee| {
-                        // If we aren't resolving inline callers, then all results will have the
-                        // same inline site, and we resolve its name once at the end.
-                        const name = pdb.findInlineeName(inlinee);
-                        for (symbols.items) |*symbol| symbol.name = name;
-                    }
-                }
-
-                // If there's room for another symbol, add the actual proc
-                if (resolve_inline_callers or symbols.items.len == 0) {
-                    try symbols.append(symbol_allocator, .{
-                        .name = if (maybe_proc) |proc| pdb.getSymbolName(proc) else null,
-                        .compile_unit_name = compile_unit_name,
-                        .source_location = pdb.getLineNumberInfo(text_arena, module, addr) catch null,
-                    });
-                }
-
-                return;
-            }
-
-            dwarf: {
-                const dwarf = &(di.dwarf orelse break :dwarf);
-                const addr = vaddr + di.coff_image_base;
-                return dwarf.getSymbols(
-                    symbol_allocator,
-                    text_arena,
-                    native_endian,
-                    addr,
-                    resolve_inline_callers,
-                    symbols,
-                );
-            }
-
-            return error.MissingDebugInfo;
-        }
+        error.OutOfMemory,
+        error.ReadFailed,
+        => |e| return e,
     };
 
-    fn deinit(module: *Module, gpa: std.mem.Allocator, io: std.Io) void {
-        if (module.name) |name| gpa.free(name);
-        if (module.di) |*di_or_err| if (di_or_err.*) |*di| di.deinit(gpa, io) else |_| {};
-        module.* = undefined;
+    if (!imageContainsCodeView(pdb.guid, pdb.age)) return error.MissingDebugInfo;
+
+    const section_table = header.section_table -| header.base_address;
+    const table_len = @as(usize, header.section_count) * @sizeOf(XbeSectionHeader);
+    if (section_table > mapped.len or table_len > mapped.len - section_table) {
+        return error.MissingDebugInfo;
     }
 
-    fn getDebugInfo(module: *Module, gpa: std.mem.Allocator, io: std.Io) std.debug.SelfInfoError!*DebugInfo {
-        if (module.di == null) module.di = loadDebugInfo(module, gpa, io);
-        return if (module.di.?) |*di| di else |err| err;
-    }
-    fn loadDebugInfo(module: *const Module, gpa: std.mem.Allocator, io: std.Io) std.debug.SelfInfoError!DebugInfo {
-        const mapped_ptr: [*]const u8 = @ptrCast(module.entry.DllBase);
-        const mapped = mapped_ptr[0..module.entry.SizeOfImage];
-        var coff_obj = std.coff.Coff.init(mapped, true) catch return error.InvalidDebugInfo;
-
-        var arena_instance: std.heap.ArenaAllocator = .init(gpa);
-        errdefer arena_instance.deinit();
-        const arena = arena_instance.allocator();
-
-        // The string table is not mapped into memory by the loader, so if a section name is in the
-        // string table then we have to map the full image file from disk. This can happen when
-        // a binary is produced with -gdwarf, since the section names are longer than 8 bytes.
-        const mapped_file: ?DebugInfo.MappedFile = mapped: {
-            if (!coff_obj.strtabRequired()) break :mapped null;
-            var path_buffer: [4 + std.os.windows.PATH_MAX_WIDE]u16 = undefined;
-            path_buffer[0..4].* = .{ '\\', '?', '?', '\\' }; // openFileAbsoluteW requires the prefix to be present
-            const path_slice = module.entry.FullDllName.slice();
-            @memcpy(path_buffer[4..][0..path_slice.len], path_slice);
-            const coff_file = std.Io.Threaded.dirOpenFileWtf16(
-                null,
-                path_buffer[0 .. 4 + path_slice.len],
-                .{},
-            ) catch |err| switch (err) {
-                error.Canceled => |e| return e,
-                error.Unexpected => |e| return e,
-                error.FileNotFound => return error.MissingDebugInfo,
-
-                error.FileTooBig,
-                error.IsDir,
-                error.NotDir,
-                error.SymLinkLoop,
-                error.NameTooLong,
-                error.BadPathName,
-                => return error.InvalidDebugInfo,
-
-                error.SystemResources,
-                error.WouldBlock,
-                error.AccessDenied,
-                error.PermissionDenied,
-                error.NoSpaceLeft,
-                error.DeviceBusy,
-                error.NoDevice,
-                error.PathAlreadyExists,
-                error.PipeBusy,
-                error.NetworkNotFound,
-                error.AntivirusInterference,
-                error.ProcessFdQuotaExceeded,
-                error.SystemFdQuotaExceeded,
-                error.FileLocksUnsupported,
-                error.FileBusy,
-                error.ReadOnlyFileSystem,
-                => return error.ReadFailed,
-            };
-            errdefer coff_file.close(io);
-            var section_handle: std.os.windows.HANDLE = undefined;
-            const create_section_rc = std.os.windows.ntdll.NtCreateSection(
-                &section_handle,
-                .{
-                    .SPECIFIC = .{ .SECTION = .{
-                        .QUERY = true,
-                        .MAP_READ = true,
-                    } },
-                    .STANDARD = .{ .RIGHTS = .REQUIRED },
-                },
-                null,
-                null,
-                .{ .READONLY = true },
-                // The documentation states that if no AllocationAttribute is specified,
-                // then SEC_COMMIT is the default.
-                // In practice, this isn't the case and specifying 0 will result in INVALID_PARAMETER_6.
-                .{ .COMMIT = true },
-                coff_file.handle,
-            );
-            if (create_section_rc != .SUCCESS) return error.MissingDebugInfo;
-            errdefer std.os.windows.CloseHandle(section_handle);
-            var coff_len: usize = 0;
-            var section_view_ptr: ?[*]const u8 = null;
-            const process_handle = std.os.windows.GetCurrentProcess();
-            const map_section_rc = std.os.windows.ntdll.NtMapViewOfSection(
-                section_handle,
-                process_handle,
-                @ptrCast(&section_view_ptr),
-                null,
-                0,
-                null,
-                &coff_len,
-                .Unmap,
-                .{},
-                .{ .READONLY = true },
-            );
-            if (map_section_rc != .SUCCESS) return error.MissingDebugInfo;
-            errdefer switch (std.os.windows.ntdll.NtUnmapViewOfSection(
-                process_handle,
-                @constCast(section_view_ptr.?),
-            )) {
-                .SUCCESS => {},
-                else => |status| std.os.windows.unexpectedStatus(status) catch {},
-            };
-            const section_view = section_view_ptr.?[0..coff_len];
-            coff_obj = std.coff.Coff.init(section_view, false) catch return error.InvalidDebugInfo;
-            break :mapped .{
-                .file = coff_file,
-                .section_handle = section_handle,
-                .section_view = section_view,
-            };
-        };
-        errdefer if (mapped_file) |*mf| mf.deinit(io);
-
-        const coff_image_base = coff_obj.getImageBase();
-
-        var opt_dwarf: ?std.debug.Dwarf = dwarf: {
-            if (coff_obj.getSectionByName(".debug_info") == null) break :dwarf null;
-
-            var sections: std.debug.Dwarf.SectionArray = undefined;
-            inline for (@typeInfo(std.debug.Dwarf.Section.Id).@"enum".fields, 0..) |section, i| {
-                sections[i] = if (coff_obj.getSectionByName("." ++ section.name)) |section_header| .{
-                    .data = try coff_obj.getSectionDataAlloc(section_header, arena),
-                    .owned = false,
-                } else null;
-            }
-            break :dwarf .{ .sections = sections };
-        };
-        errdefer if (opt_dwarf) |*dwarf| dwarf.deinit(gpa);
-
-        if (opt_dwarf) |*dwarf| {
-            dwarf.open(gpa, native_endian) catch |err| switch (err) {
-                error.Overflow,
-                error.EndOfStream,
-                error.StreamTooLong,
-                error.ReadFailed,
-                => return error.InvalidDebugInfo,
-
-                error.InvalidDebugInfo,
-                error.MissingDebugInfo,
-                error.OutOfMemory,
-                => |e| return e,
-            };
-        }
-
-        var opt_pdb: ?std.debug.Pdb = pdb: {
-            const path = coff_obj.getPdbPath() catch {
-                return error.InvalidDebugInfo;
-            } orelse {
-                break :pdb null;
-            };
-            const pdb_file_open_result = if (std.fs.path.isAbsolute(path)) res: {
-                break :res std.Io.Dir.cwd().openFile(io, path, .{});
-            } else res: {
-                const self_dir = std.process.executableDirPathAlloc(io, gpa) catch |err| switch (err) {
-                    error.OutOfMemory, error.Unexpected => |e| return e,
-                    else => return error.ReadFailed,
-                };
-                defer gpa.free(self_dir);
-                const abs_path = try std.fs.path.join(gpa, &.{ self_dir, path });
-                defer gpa.free(abs_path);
-                break :res std.Io.Dir.cwd().openFile(io, abs_path, .{});
-            };
-            const pdb_file = pdb_file_open_result catch |err| switch (err) {
-                error.FileNotFound, error.IsDir => break :pdb null,
-                else => return error.ReadFailed,
-            };
-            errdefer pdb_file.close(io);
-
-            const pdb_reader = try arena.create(std.Io.File.Reader);
-            pdb_reader.* = pdb_file.reader(io, try arena.alloc(u8, 4096));
-
-            var pdb = std.debug.Pdb.init(gpa, pdb_reader) catch |err| switch (err) {
-                error.OutOfMemory, error.ReadFailed, error.Unexpected => |e| return e,
-                else => return error.InvalidDebugInfo,
-            };
-            errdefer pdb.deinit();
-            pdb.parseInfoStream() catch |err| switch (err) {
-                error.UnknownPDBVersion => return error.UnsupportedDebugInfo,
-                error.EndOfStream => return error.InvalidDebugInfo,
-
-                error.InvalidDebugInfo,
-                error.MissingDebugInfo,
-                error.OutOfMemory,
-                error.ReadFailed,
-                => |e| return e,
-            };
-            pdb.parseDbiStream() catch |err| switch (err) {
-                error.UnknownPDBVersion => return error.UnsupportedDebugInfo,
-
-                error.EndOfStream,
-                error.EOF,
-                error.StreamTooLong,
-                error.WriteFailed,
-                => return error.InvalidDebugInfo,
-
-                error.InvalidDebugInfo,
-                error.OutOfMemory,
-                error.ReadFailed,
-                => |e| return e,
-            };
-            pdb.parseIpiStream() catch |err| switch (err) {
-                error.UnknownPDBVersion => return error.UnsupportedDebugInfo,
-
-                error.EndOfStream,
-                => return error.InvalidDebugInfo,
-
-                error.OutOfMemory,
-                error.ReadFailed,
-                => |e| return e,
-            };
-
-            if (!std.mem.eql(u8, &coff_obj.guid, &pdb.guid) or coff_obj.age != pdb.age)
-                return error.InvalidDebugInfo;
-
-            break :pdb pdb;
-        };
-        errdefer if (opt_pdb) |*pdb| {
-            pdb.file_reader.file.close(io);
-            pdb.deinit();
-        };
-
-        const coff_section_headers: []std.coff.SectionHeader = if (opt_pdb != null) csh: {
-            break :csh try coff_obj.getSectionHeadersAlloc(arena);
-        } else &.{};
-
-        return .{
-            .arena = arena_instance.state,
-            .coff_image_base = coff_image_base,
-            .mapped_file = mapped_file,
-            .dwarf = opt_dwarf,
-            .pdb = opt_pdb,
-            .coff_section_headers = coff_section_headers,
-        };
-    }
-};
-
-/// Assumes we already hold `si.lock`.
-fn findModule(si: *SelfInfo, gpa: std.mem.Allocator, address: usize) error{ MissingDebugInfo, OutOfMemory, Unexpected }!*Module {
-    for (si.modules.items) |*mod| {
-        const base = @intFromPtr(mod.entry.DllBase);
-        if (address >= base and address < base + mod.entry.SizeOfImage) return mod;
-    }
-    try si.modules.ensureUnusedCapacity(gpa, 1);
-    var entry: *std.os.windows.LDR.DATA_TABLE_ENTRY = undefined;
-    switch (std.os.windows.ntdll.LdrFindEntryForAddress(@ptrFromInt(address), &entry)) {
-        .SUCCESS => {},
-        .DLL_NOT_FOUND => return error.MissingDebugInfo,
-        else => |status| return std.os.windows.unexpectedStatus(status),
-    }
-    if (si.notification_cookie == null) {
-        var notification_cookie: std.os.windows.LDR.DLL_NOTIFICATION.COOKIE = undefined;
-        switch ((try si.getNtdllProc(.LdrRegisterDllNotification))(
-            .{},
-            &dllNotification,
-            si,
-            &notification_cookie,
-        )) {
-            .SUCCESS => si.notification_cookie = notification_cookie,
-            else => |status| return std.os.windows.unexpectedStatus(status),
-        }
-    }
-    const mod = si.modules.addOneAssumeCapacity();
-    mod.* = .{ .entry = entry, .name = null, .di = null };
-    return mod;
+    return .{
+        .arena = arena_instance.state,
+        .pdb = pdb,
+        .section_headers = @as([*]align(1) const XbeSectionHeader, @ptrCast(
+            mapped.ptr + section_table,
+        ))[0..header.section_count],
+    };
 }
 
-inline fn getNtdllProc(
-    si: *SelfInfo,
-    comptime proc: std.meta.DeclEnum(std.os.windows.ntdll),
-) !@TypeOf(&@field(std.os.windows.ntdll, @tagName(proc))) {
-    return if (load_dll_notification_procs)
-        @ptrCast(try si.loadNtdllProc(@tagName(proc)))
+/// Fallback for when `D:` isn't a drive letter yet (xemu at panic time): open
+/// the PDB sibling of the boot image via the boot device path. The kernel
+/// recorded the full NT path it used to launch us in `XeImageFileName` (e.g.
+/// `\Device\CdRom0\default.xbe`); we take its directory and append the PDB
+/// basename from the XBE header path (`D:\default.pdb` -> `default.pdb`), then
+/// open with `RootDirectory=NULL` so the path is fully qualified with no DOS
+/// drive-letter dependency. Returns an open std.Io.File; the rest of the PDB
+/// pipeline (stat/reader/handle) goes through debug_io's Nt* bindings.
+fn openPdbOnBootDevice(header_path: []const u8) std.Io.File.OpenError!std.Io.File {
+    const image_file = xboxkrnl.xboxkrnl.XeImageFileName();
+    const image_buf_ptr = image_file.*.Buffer orelse
+        return error.FileNotFound;
+    const image_path = std.mem.span(image_buf_ptr);
+
+    const last_sep = std.mem.lastIndexOfScalar(u8, image_path, std.Io.Dir.path.sep_windows) orelse
+        return error.BadPathName;
+    const img_dir = image_path[0..last_sep]; // e.g. "\Device\CdRom0"
+
+    // Basename of the header path, e.g. "D:\default.pdb" -> "default.pdb".
+    const base = if (std.mem.lastIndexOfScalar(u8, header_path, '\\')) |sep|
+        header_path[sep + 1 ..]
     else
-        &@field(std.os.windows.ntdll, @tagName(proc));
-}
-fn loadNtdllProc(si: *SelfInfo, name: []const u8) std.Io.UnexpectedError!*anyopaque {
-    const ntdll_handle = si.ntdll_handle orelse ntdll_handle: {
-        var ntdll_handle: *anyopaque = undefined;
-        switch (std.os.windows.ntdll.LdrLoadDll(null, null, &.init(
-            &.{ 'n', 't', 'd', 'l', 'l', '.', 'd', 'l', 'l' },
-        ), &ntdll_handle)) {
-            .SUCCESS => {},
-            .DLL_NOT_FOUND => return error.Unexpected,
-            else => |status| return std.os.windows.unexpectedStatus(status),
-        }
-        si.ntdll_handle = ntdll_handle;
-        break :ntdll_handle ntdll_handle;
+        header_path;
+
+    var full: [512:0]u8 = @splat(0);
+    const path_len = img_dir.len + 1 + base.len;
+    if (path_len + 1 >= full.len) return error.NameTooLong;
+    @memcpy(full[0..img_dir.len], img_dir);
+    full[img_dir.len] = '\\';
+    @memcpy(full[img_dir.len + 1 .. path_len], base);
+    full[path_len] = 0;
+
+    var ansi_path: xboxkrnl.xboxdef.ANSI_STRING = .{
+        .Length = @intCast(path_len),
+        .MaximumLength = @intCast(path_len + 1),
+        .Buffer = @ptrCast(&full),
     };
-    var proc_addr: *anyopaque = undefined;
-    switch (std.os.windows.ntdll.LdrGetProcedureAddress(ntdll_handle, &.init(name), 0, &proc_addr)) {
-        .SUCCESS => {},
-        else => |status| return std.os.windows.unexpectedStatus(status),
+
+    const attributes: xboxkrnl.xboxkrnl.OBJECT_ATTRIBUTES = .{
+        .RootDirectory = null, // fully qualified path: NULL root
+        .ObjectName = &ansi_path,
+        .Attributes = xboxkrnl.xboxkrnl.OBJ_CASE_INSENSITIVE,
+    };
+
+    var io_status_block: xboxkrnl.xboxkrnl.IO_STATUS_BLOCK = undefined;
+    var handle: xboxkrnl.xboxdef.HANDLE = undefined;
+    const status = xboxkrnl.xboxkrnl.NtCreateFile(
+        &handle,
+        xboxkrnl.xboxkrnl.FILE_GENERIC_READ, // includes SYNCHRONIZE
+        &attributes,
+        &io_status_block,
+        null,
+        xboxkrnl.xboxdef.FILE_ATTRIBUTE_NORMAL,
+        xboxkrnl.xboxkrnl.FILE_SHARE_READ | xboxkrnl.xboxkrnl.FILE_SHARE_WRITE,
+        xboxkrnl.xboxkrnl.FILE_OPEN,
+        xboxkrnl.xboxkrnl.FILE_SYNCHRONOUS_IO_NONALERT |
+            xboxkrnl.xboxkrnl.FILE_NON_DIRECTORY_FILE,
+    );
+
+    const status_bits: u32 = @bitCast(status);
+    if (status_bits == xboxkrnl.ntstatus.STATUS_SUCCESS) {
+        return .{
+            .handle = handle,
+            .flags = .{ .nonblocking = false }, // opened with FILE_SYNCHRONOUS_IO_NONALERT
+        };
     }
-    return proc_addr;
+    return switch (status_bits) {
+        xboxkrnl.ntstatus.STATUS_OBJECT_NAME_NOT_FOUND,
+        xboxkrnl.ntstatus.STATUS_OBJECT_PATH_NOT_FOUND,
+        xboxkrnl.ntstatus.STATUS_OBJECT_NAME_INVALID,
+        xboxkrnl.ntstatus.STATUS_OBJECT_PATH_SYNTAX_BAD,
+        => error.FileNotFound,
+        xboxkrnl.ntstatus.STATUS_ACCESS_DENIED => error.AccessDenied,
+        else => error.Unexpected,
+    };
 }
 
-fn dllNotification(
-    reason: std.os.windows.LDR.DLL_NOTIFICATION.REASON,
-    data: *const std.os.windows.LDR.DLL_NOTIFICATION.DATA,
-    context: ?*anyopaque,
-) callconv(.winapi) void {
-    const si: *SelfInfo = @ptrCast(@alignCast(context));
-    switch (reason) {
-        .LOADED => {},
-        .UNLOADED => {
-            const io = std.Options.debug_io;
-            si.lock.lockUncancelable(io);
-            defer si.lock.unlock(io);
-            for (si.modules.items, 0..) |*mod, mod_index| {
-                if (mod.entry.DllBase != data.Unloaded.DllBase) continue;
-                mod.deinit(std.debug.getDebugInfoAllocator(), io);
-                _ = si.modules.swapRemove(mod_index);
-                break;
-            }
-        },
+/// Locates a CodeView `RSDS` record in the mapped image that names exactly this PDB.
+/// `cxbe` strips the PE headers, so the image has no data directories left to point at
+/// the debug directory and the record has to be found by scanning. Requiring a GUID and
+/// age match rejects a stale `default.pdb` left on the ISO -- and, symmetrically, a
+/// stale XBE -- rather than silently attributing line numbers from the wrong build.
+fn imageContainsCodeView(guid: [16]u8, age: u32) bool {
+    var rest = image();
+    while (std.mem.indexOf(u8, rest, "RSDS")) |offset| {
+        const record = rest[offset..];
+        if (record.len >= 24 and
+            std.mem.eql(u8, record[4..20], &guid) and
+            std.mem.readInt(u32, record[20..24], .little) == age)
+        {
+            return true;
+        }
+        rest = record[1..];
     }
+    return false;
 }
+
+fn xbeHeader() *align(1) const XbeHeader {
+    return @ptrFromInt(winapi.winnt.XBE_DEFAULT_BASE);
+}
+
+fn image() []const u8 {
+    const header = xbeHeader();
+    const ptr: [*]const u8 = @ptrCast(header);
+    return ptr[0..header.size_of_image];
+}
+
+const DebugInfo = struct {
+    arena: std.heap.ArenaAllocator.State,
+    pdb: std.debug.Pdb,
+    /// Borrowed from the mapped image rather than owned by `arena`. `align(1)` because
+    /// the table is not guaranteed to land on an `extern struct`'s natural alignment.
+    section_headers: []align(1) const XbeSectionHeader,
+
+    fn deinit(di: *DebugInfo, gpa: std.mem.Allocator, io: std.Io) void {
+        // `Pdb.deinit` frees its own allocations but does not close the file.
+        di.pdb.file_reader.file.close(io);
+        di.pdb.deinit();
+
+        var arena = di.arena.promote(gpa);
+        arena.deinit();
+    }
+
+    fn getSymbols(
+        di: *DebugInfo,
+        symbol_allocator: std.mem.Allocator,
+        text_arena: std.mem.Allocator,
+        vaddr: usize,
+        resolve_inline_callers: bool,
+        symbols: *std.ArrayList(std.debug.Symbol),
+    ) std.debug.SelfInfoError!void {
+        const base_address = xbeHeader().base_address;
+
+        const pdb = &di.pdb;
+        var section_rva: u32 = undefined;
+        const mod_index = for (pdb.sect_contribs) |sect_contrib| {
+            if (sect_contrib.section > di.section_headers.len) continue;
+            // Remember that SectionContribEntry.Section is 1-based.
+            section_rva = di.section_headers[sect_contrib.section - 1].virtual_address - base_address;
+
+            const vaddr_start = section_rva + sect_contrib.offset;
+            const vaddr_end = vaddr_start + sect_contrib.size;
+            // `vaddr` is an absolute VMA, but XBE section `virtual_address` is also
+            // absolute, so `section_rva` and the contribution range live in RVA space.
+            // Convert before comparing.
+            const vaddr_rva = vaddr -| base_address;
+            if (vaddr_rva >= vaddr_start and vaddr_rva < vaddr_end) {
+                break sect_contrib.module_index;
+            }
+        } else {
+            // we have no information to add to the address
+            return error.MissingDebugInfo;
+        };
+        const module = pdb.getModule(mod_index) catch |err| switch (err) {
+            error.InvalidDebugInfo,
+            error.MissingDebugInfo,
+            error.OutOfMemory,
+            => |e| return e,
+
+            error.ReadFailed,
+            error.EndOfStream,
+            => return error.InvalidDebugInfo,
+        } orelse {
+            return error.InvalidDebugInfo; // bad module index
+        };
+
+        // C13 line/proc data is written relative to the module section start
+        // (reloc_offset/offset fields), not to the image RVA: adding the section
+        // RVA gets back to image space, so `getProcSym`/`getLineNumberInfo` must
+        // be given `vaddr` converted to section-relative coordinates.
+        const addr = vaddr -| base_address -| section_rva;
+        const maybe_proc = pdb.getProcSym(module, addr);
+        const compile_unit_name = std.fs.path.basename(module.obj_file_name);
+        const symbols_top = symbols.items.len;
+        if (maybe_proc) |proc| {
+            const offset_in_func = addr - proc.code_offset;
+            var last_inlinee: ?u32 = null;
+            var iter = pdb.getInlinees(module, proc);
+            while (iter.next(module)) |inline_site| {
+                // Filter out duplicate inline sites. Tools like llvm-addr2line output
+                // duplicate sites in the same cases as us if we elide this check,
+                // implying that they exist in the underlying data and are not indicative
+                // of a parser bug. No useful information is lost here since an inline site
+                // can't actually reference itself.
+                if (inline_site.inlinee == last_inlinee) continue;
+
+                // If our address points into this site, get the source location(s) it
+                // points at
+                for (pdb.getInlineeSourceLines(
+                    module,
+                    inline_site.inlinee,
+                )) |inlinee_src_line| {
+                    const maybe_loc = pdb.getInlineSiteSourceLocation(
+                        text_arena,
+                        module,
+                        inline_site,
+                        inlinee_src_line.info,
+                        offset_in_func,
+                    ) catch continue;
+                    var loc = maybe_loc orelse continue;
+                    // The PDB records absolute build-host paths; on the console
+                    // only the file name is meaningful (`main.zig:10`), and the
+                    // directory part can never be opened there anyway.
+                    loc.file_name = std.fs.path.basename(loc.file_name);
+
+                    // If we aren't trying to resolve inline callers, and we've matched a
+                    // new inline site, we want to overwrite the previously appended
+                    // results.
+                    if (!resolve_inline_callers and inline_site.inlinee != last_inlinee) {
+                        symbols.items.len = symbols_top;
+                    }
+
+                    // Only resolve the name if we're resolving inline callers, otherwise
+                    // wait until we're done to avoid duplicated work.
+                    const name = if (resolve_inline_callers)
+                        pdb.findInlineeName(inline_site.inlinee)
+                    else
+                        null;
+
+                    try symbols.append(symbol_allocator, .{
+                        .name = name,
+                        .compile_unit_name = compile_unit_name,
+                        .source_location = loc,
+                    });
+
+                    last_inlinee = inline_site.inlinee;
+                }
+            }
+
+            if (resolve_inline_callers) {
+                // Inline sites are stored in the pdb in reverse order, so we reverse the
+                // matching sites here. We could alternatively use the parent fields to
+                // determine the order, but this would introduce seemingly unecessary
+                // complexity.
+                std.mem.reverse(std.debug.Symbol, symbols.items);
+            } else if (last_inlinee) |inlinee| {
+                // If we aren't resolving inline callers, then all results will have the
+                // same inline site, and we resolve its name once at the end.
+                const name = pdb.findInlineeName(inlinee);
+                for (symbols.items) |*symbol| symbol.name = name;
+            }
+        }
+
+        // If there's room for another symbol, add the actual proc
+        if (resolve_inline_callers or symbols.items.len == 0) {
+            var loc = pdb.getLineNumberInfo(text_arena, module, addr) catch null;
+            if (loc) |*sl| sl.file_name = std.fs.path.basename(sl.file_name);
+            try symbols.append(symbol_allocator, .{
+                .name = if (maybe_proc) |proc| pdb.getSymbolName(proc) else null,
+                .compile_unit_name = compile_unit_name,
+                .source_location = loc,
+            });
+        }
+    }
+};
+
+/// The XBE image header as written by `cxbe`; see `XBE_FILE_HEADER` in NXDK's
+/// winnt.h. Only the leading fields are modelled. `cxbe` writes no PE or optional
+/// header into the image, so this is the only description of the loaded image we
+/// have -- there are no data directories to consult.
+const XbeHeader = extern struct {
+    magic: u32,
+    signature: [256]u8,
+    base_address: u32,
+    size_of_headers: u32,
+    size_of_image: u32,
+    size_of_image_header: u32,
+    time_date_stamp: u32,
+    certificate_header: u32,
+    section_count: u32,
+    section_table: u32,
+    init_flags: u32,
+    entry_point: u32,
+    tls_directory: u32,
+    stack_reserve: u32,
+    heap_reserve: u32,
+    heap_commit: u32,
+    pe_image_base: u32,
+    pe_size_of_image: u32,
+    pe_image_checksum: u32,
+    pe_time_date_stamp: u32,
+    /// Address of the NUL-terminated PDB path recorded by `cxbe -DEBUGPATH:`, or zero
+    /// when no path was given.
+    pe_debug_path: u32,
+    pe_debug_filename: u32,
+    pe_debug_filename_unicode: u32,
+
+    comptime {
+        std.debug.assert(@offsetOf(XbeHeader, "base_address") == 0x104);
+        std.debug.assert(@offsetOf(XbeHeader, "size_of_image") == 0x10c);
+        std.debug.assert(@offsetOf(XbeHeader, "section_count") == 0x11c);
+        std.debug.assert(@offsetOf(XbeHeader, "section_table") == 0x120);
+        std.debug.assert(@offsetOf(XbeHeader, "pe_debug_path") == 0x14c);
+    }
+};
+
+/// One entry of the XBE section table as written by `cxbe`; see `Xbe::SectionHeader` in
+/// cxbe's Xbe.h. This is *not* `std.coff.SectionHeader` -- different fields, 56 bytes
+/// rather than 40 -- but `cxbe` emits one entry per COFF section in the same order, so
+/// `std.pdb.SectionContribEntry.section` (which is 1-based) indexes this directly.
+/// `virtual_address` is an absolute address rather than an RVA, and `virtual_size` is
+/// rounded up to the allocation granularity, so it is never smaller than the COFF
+/// virtual size.
+const XbeSectionHeader = extern struct {
+    flags: u32,
+    virtual_address: u32,
+    virtual_size: u32,
+    raw_address: u32,
+    raw_size: u32,
+    name_address: u32,
+    section_ref_count: u32,
+    head_shared_ref_count_address: u32,
+    tail_shared_ref_count_address: u32,
+    section_digest: [20]u8,
+
+    comptime {
+        std.debug.assert(@sizeOf(XbeSectionHeader) == 56);
+    }
+};

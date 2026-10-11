@@ -1,37 +1,68 @@
 const std = @import("std");
 const nxdk_hal = @import("nxdk_hal");
+const xboxkrnl = @import("xboxkrnl");
 
 pub const panic = std.debug.FullPanic(panicImpl);
-var panic_buf: [256]u8 = @splat(0);
+var panic_buf: [512]u8 = @splat(0);
+threadlocal var in_panic: bool = false;
 
-fn panicImpl(msg: []const u8, first_trace_addr: ?usize) noreturn {
-    // _ = first_trace_addr;
+// `noinline` so `@returnAddress()` below resolves to the call site in the code
+// that panicked instead of to whatever function `panicImpl` got inlined into.
+noinline fn panicImpl(msg: []const u8, first_trace_addr: ?usize) noreturn {
+    // Report the message *before* the re-entrancy gate: a nested panic (a
+    // Debug safety check firing while already inside the handler) hits
+    // `while (true) {}` below, and would otherwise freeze the console on the
+    // last line with no message at all. DbgPrint mirrors the line to the host
+    // debugger; the framebuffer glyph blitter only renders when video is up.
+    {
+        var writer: std.Io.Writer = .fixed(&panic_buf);
+        writer.end = 0;
 
-    if (nxdk_hal.video.XVideoGetFB() == null) {
-        while (true) {} // halt; a trap would re-enter the kernel exception dispatcher
+        writer.print("panic: {s}\n", .{msg}) catch {};
+
+        if (writer.end == writer.buffer.len) {
+            writer.buffer[writer.end - 1] = 0;
+        } else {
+            writer.writeByte(0) catch {};
+        }
+        _ = xboxkrnl.xboxkrnl.DbgPrint("%s", &panic_buf);
+        if (nxdk_hal.video.XVideoGetFB() != null) {
+            nxdk_hal.debug.debugPrint("%s", &panic_buf);
+        }
     }
-
-    var writer: std.Io.Writer = .fixed(&panic_buf);
-
-    writer.print("PANIC: {s} at ", .{msg}) catch {};
-    writer.print("0x{x}", .{first_trace_addr orelse 0}) catch {};
-
-    // const n = @min(msg.len, panic_buf.len - 1);
-    // @memcpy(panic_buf[0..n], msg[0..n]);
-    // panic_buf[n] = 0;
-    // nxdk_hal.debug.debugPrint("PANIC: %s at ", panic_buf[0..n :0].ptr);
-    // panic_buf = @splat(0);
-
-    // panic_buf[panic_buf.len - 1] = 0;
-    // panic_buf[0] = 'A';
-    // nxdk_hal.debug.debugPrint("%s\n", &panic_buf);
-
-    if (writer.end == writer.buffer.len) {
-        writer.buffer[writer.end - 1] = 0;
-    } else {
-        writer.writeByte(0) catch {};
+    if (in_panic) {
+        while (true) {}
     }
-    nxdk_hal.debug.debugPrint("%s", &panic_buf);
+    in_panic = true;
 
-    while (true) {} // halt; a trap would re-enter the kernel exception dispatcher
+    // Symbolize the address the compiler handed us. Safety panics always pass a
+    // real return address, but `@panic` passes null (the compiler materialises a
+    // constant `?usize = null`), so fall back to our own return address — with
+    // `panicImpl` marked `noinline` that is the caller's call site in user code.
+    // This is a single-entry synthetic trace rather than `dumpCurrentStackTrace`,
+    // so no unwinder is involved and it behaves identically in ReleaseSafe/Fast.
+    //
+    // Resolve `first_addr - 1`: a return address is the instruction *after* the
+    // `call`, which can land on the first byte past the caller's line fragment
+    // (this build puts it on a `nop` padding byte). Stepping back one byte puts
+    // it on the last byte of the `call` itself, which routinely falls inside the
+    // caller's fragment. This is the standard "call site vs return site" fix
+    // used by unwinders; without it even llvm-addr2line maps the address to the
+    // function boundary (`wWinMainCRTStartup ??:0`).
+    const first_addr = (first_trace_addr orelse @returnAddress()) -| 1;
+
+    // The symbolization below goes through the console writer in debug_io.zig,
+    // which drops the framebuffer sink on its own and still reaches the host
+    // debugger. It loads the PDB lazily through the cached `SelfInfo`; a failed
+    // load degrades to `???:?:?` rather than recursing into the panic handler.
+    // `dumpStackTrace` locks stderr (see debug_io.zig), prints, and swallows
+    // write errors.
+    var addr_buf: [1]usize = .{first_addr};
+    const trace: std.debug.StackTrace = .{
+        .return_addresses = addr_buf[0..],
+        .skipped = .none,
+    };
+    std.debug.dumpStackTrace(&trace);
+
+    while (true) {}
 }
