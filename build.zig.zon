@@ -24,6 +24,10 @@
             .url = "git+https://github.com/lwip-tcpip/lwip.git#STABLE-2_2_1_RELEASE",
             .hash = "N-V-__8AACvNdQDS3TeYO1TRpY4Sa8mSh-PZ-0byqy8GTJ0e",
         },
+        .libusbohci = .{
+            .url = "git+https://github.com/XboxDev/libusbohci.git#6a0c5fefbcd9db53f4a27ee10df99f93d5bce745",
+            .hash = "N-V-__8AAJhmCgApFhSR1oXOjUzD8uyd9Cn5HdKO2NE5J8xd",
+        },
         // .@"libjpeg-turbo" = .{
         //     .url = "git+https://github.com/libjpeg-turbo/libjpeg-turbo.git#2.0.4",
         //     .hash = "N-V-__8AANgyewBPvIuvY26aHxw3fYPyQL_JBAhQ0jMiE5QK",

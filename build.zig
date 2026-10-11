@@ -380,6 +380,53 @@ pub fn build(b: *std.Build) !void {
     winapi_mod.linkLibrary(libwinapi);
     xboxrt_mod.addImport("winapi", winapi_mod);
 
+    const libnxdk_usb = try buildLib(.{
+        .b = b,
+        .target = target,
+        .optimize = optimize,
+        .lto = lto,
+        .lib_name = "nxdk_usb",
+        .exclude_c_names = &.{ "ehci.c", "ehci_iso.c" },
+        .lib_deps = &.{
+            .{
+                .name = "libusbohci",
+                .include_paths = &.{
+                    "inc",
+                },
+                .walker_paths = &.{"."},
+            },
+            .{
+                .name = "nxdk",
+                .include_paths = &.{
+                    "lib",
+                    "lib/winapi",
+                    "lib/usb/libusbohci_xbox",
+                    "lib/xboxrt/vcruntime",
+                },
+                .iter_paths = &.{
+                    "lib/usb/libusbohci_xbox",
+                },
+                .macro_paths = &.{.{
+                    .define = "USBH_USE_EXTERNAL_CONFIG",
+                    .path = "lib/usb/libusbohci_xbox/usbh_config_xbox.h",
+                }},
+            },
+            .{
+                .name = "nxdk-pdclib",
+                .include_paths = &.{
+                    "platform/xbox/include",
+                    "include",
+                },
+            },
+        },
+    });
+    const nxdk_usb_mod = b.addModule("nxdk_usb", .{
+        .root_source_file = b.path("src/nxdk_usb/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    nxdk_usb_mod.linkLibrary(libnxdk_usb);
+
     const mod_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/test.zig"),
@@ -708,6 +755,12 @@ fn buildLib(info: LibInfo) !*std.Build.Step.Compile {
     for (info.lib_deps) |lib_dep| {
         const dep = info.b.dependency(lib_dep.name, .{});
 
+        if (lib_dep.macro_paths) |macro_paths| {
+            for (macro_paths) |path| {
+                lib.root_module.addCMacro(path.define, info.b.fmt("\"{s}\"", .{dep.path(path.path).getPath(info.b)}));
+            }
+        }
+
         for (lib_dep.include_paths) |path| {
             lib.root_module.addIncludePath(dep.path(path));
             lib.installHeadersDirectory(dep.path(path), "", .{});
@@ -1007,8 +1060,13 @@ const LibInfo = struct {
     lib_deps: []const struct {
         name: []const u8,
         include_paths: []const []const u8,
-        walker_paths: ?[]const []const u8,
-        iter_paths: ?[]const []const u8,
+        walker_paths: ?[]const []const u8 = null,
+        iter_paths: ?[]const []const u8 = null,
+        /// Relative to the depdendency root
+        macro_paths: ?[]const struct {
+            define: []const u8,
+            path: []const u8,
+        } = null,
     },
 };
 
@@ -1039,3 +1097,44 @@ pub const cpp_flags: []const []const u8 = &.{
     "-U__STDC_NO_THREADS__",
     "-fno-exceptions",
 };
+
+pub const nxdk_c_include_dirs: []const []const u8 = &.{
+    "lib",
+    "lib/winapi",
+    "lib/xboxrt/vcruntime",
+    "lib/xboxrt/libc_extensions",
+    "lib/nxdk",
+    "lib/hal",
+    "lib/xboxkrnl",
+    "lib/usb/libusbohci_xbox",
+};
+
+pub const pdclib_c_include_dirs: []const []const u8 = &.{
+    "include",
+    "platform/xbox/include",
+};
+
+pub const libusbohci_c_include_dirs: []const []const u8 = &.{
+    "inc",
+};
+
+/// Adds every include directory needed to compile C code against the nxdk and
+/// pdclib headers to `mod`. Intended for consumers that bundle external C
+/// sources (for example a library wrapper such as SDL3) into their own
+/// module, so they do not have to reach into nxdk_zig's private dependencies
+/// or hardcode the header layout themselves.
+pub fn addCIncludePaths(mod: *std.Build.Module, nxdk_zig_dep: *std.Build.Dependency) void {
+    const nxdk_dep = nxdk_zig_dep.builder.dependency("nxdk", .{});
+    for (nxdk_c_include_dirs) |dir| mod.addIncludePath(nxdk_dep.path(dir));
+
+    const pdclib_dep = nxdk_zig_dep.builder.dependency("nxdk-pdclib", .{});
+    for (pdclib_c_include_dirs) |dir| mod.addIncludePath(pdclib_dep.path(dir));
+
+    const libusbohci_dep = nxdk_zig_dep.builder.dependency("libusbohci", .{});
+    for (libusbohci_c_include_dirs) |dir| mod.addIncludePath(libusbohci_dep.path(dir));
+    mod.addCMacro("USBH_USE_EXTERNAL_CONFIG", "\"usbh_config_xbox.h\"");
+
+    const usb_tree = mod.owner.addWriteFiles();
+    _ = usb_tree.addCopyDirectory(libusbohci_dep.path("inc"), "usb/libusbohci/inc", .{});
+    mod.addIncludePath(usb_tree.getDirectory());
+}
