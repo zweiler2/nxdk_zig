@@ -466,6 +466,7 @@ pub fn createExe(
     user_root_source_file: std.Build.LazyPath,
     /// NOTE: LTO on Debug builds disables `bundle_ubsan_rt`
     lto: ?std.zig.LtoMode,
+    imports: ?[]const std.Build.Module.Import,
 ) !*std.Build.Step.Compile {
     // Resolve nxdk again through the nxdk_zig package so this works from any
     // consumer build (external callers pass their own `b`, which does not
@@ -480,7 +481,7 @@ pub fn createExe(
         nxdk_dep,
         pdclib_dep,
     );
-    return createExeWithModules(b, optimize, name, user_root_source_file, nxdk_zig_dep.path("src/start/start.zig"), lto, automount_d, .{
+    return createExeWithModules(b, optimize, name, user_root_source_file, nxdk_zig_dep.path("src/start/start.zig"), lto, automount_d, imports, .{
         .pdclib = nxdk_zig_dep.module("pdclib"),
         .nxdk = nxdk_zig_dep.module("nxdk"),
         .xboxrt = nxdk_zig_dep.module("xboxrt"),
@@ -504,6 +505,7 @@ fn createExeWithModules(
     /// non-null it is linked directly into the executable so its `.CRT$XIT`
     /// initializer mounts the XBE's directory as `D:`. Null disables automount.
     automount_d: ?*std.Build.Step.Compile,
+    imports: ?[]const std.Build.Module.Import,
     mods: struct {
         pdclib: *std.Build.Module,
         nxdk: *std.Build.Module,
@@ -532,6 +534,11 @@ fn createExeWithModules(
             .{ .name = "winmm", .module = mods.winmm },
         },
     });
+    if (imports) |impor| {
+        for (impor) |imp| {
+            user_mod.addImport(imp.name, imp.module);
+        }
+    }
 
     const exe = b.addExecutable(.{
         .name = name,
@@ -553,7 +560,7 @@ fn createExeWithModules(
         }),
     });
 
-    if (optimize == .Debug and (lto orelse .none) != .none) {
+    if (optimize == .debug and (lto orelse .none) != .none) {
         exe.bundle_ubsan_rt = false;
     }
     exe.lto = lto;
@@ -602,7 +609,7 @@ fn convertExeToXboxExeWithDep(
     cmd.addArtifactArg(cxbe_exe);
     const xbe_file_path = cmd.addPrefixedOutputFileArg("-OUT:", b.fmt("{s}.xbe", .{exe.name}));
     cmd.addArg(b.fmt("-TITLE:{s}", .{exe.name}));
-    cmd.addArg(b.fmt("-MODE:{s}", .{if (optimize == .Debug) "debug" else "retail"}));
+    cmd.addArg(b.fmt("-MODE:{s}", .{if (optimize == .debug) "debug" else "retail"}));
     if (exe.producesPdbFile()) {
         cmd.addArg("-DEBUGPATH:D:\\default.pdb");
     }
@@ -632,7 +639,7 @@ fn convertExeToXboxExeWithDep(
 
     return .{
         .step = &install_xbe.step,
-        .dir_path = .{ .cwd_relative = b.pathFromRoot(b.fmt("{s}/{s}", .{ b.install_prefix, relative_install_path })) },
+        .dir_path = b.graph.path(.install_prefix, relative_install_path),
     };
 }
 
@@ -743,7 +750,7 @@ fn buildLib(info: LibInfo) !*std.Build.Step.Compile {
             .sanitize_c = .off,
         }),
     });
-    if (info.optimize == .Debug and (info.lto orelse .none) != .none) {
+    if (info.optimize == .debug and (info.lto orelse .none) != .none) {
         lib.bundle_ubsan_rt = false;
     }
     lib.lto = info.lto;
@@ -757,7 +764,13 @@ fn buildLib(info: LibInfo) !*std.Build.Step.Compile {
 
         if (lib_dep.macro_paths) |macro_paths| {
             for (macro_paths) |path| {
-                lib.root_module.addCMacro(path.define, info.b.fmt("\"{s}\"", .{dep.path(path.path).getPath(info.b)}));
+                lib.root_module.addCMacro(path.define, info.b.fmt("{q}", .{
+                    try dep.builder.root.root_dir.handle.realPathFileAlloc(
+                        info.b.graph.io,
+                        path.path,
+                        info.b.allocator,
+                    ),
+                }));
             }
         }
 
@@ -864,8 +877,7 @@ fn gatherCFilesWalker(
     custom_flags: ?[]const []const u8,
     exclude_c_names: []const []const u8,
 ) !void {
-    const dep_path = try dep.path(path).getPath4(b, null);
-    var dir = try dep_path.openDir(b.graph.io, ".", .{ .iterate = true });
+    const dir = try dep.builder.root.openDir(b.graph.io, path, .{ .iterate = true });
     defer dir.close(b.graph.io);
 
     var walker = try dir.walk(b.allocator);
@@ -905,8 +917,7 @@ fn gatherCFilesIter(
     custom_flags: ?[]const []const u8,
     exclude_c_names: []const []const u8,
 ) !void {
-    const dep_path = try dep.path(path).getPath4(b, null);
-    var dir = try dep_path.openDir(b.graph.io, ".", .{ .iterate = true });
+    const dir = try dep.builder.root.openDir(b.graph.io, path, .{ .iterate = true });
     defer dir.close(b.graph.io);
 
     var iter = dir.iterate();
@@ -944,8 +955,7 @@ fn gatherCPPFilesIter(
     lib: *std.Build.Step.Compile,
     custom_flags: ?[]const []const u8,
 ) !void {
-    const dep_path = try dep.path(path).getPath4(b, null);
-    var dir = try dep_path.openDir(b.graph.io, ".", .{ .iterate = true });
+    const dir = try dep.builder.root.openDir(b.graph.io, path, .{ .iterate = true });
     defer dir.close(b.graph.io);
 
     var iter = dir.iterate();
@@ -999,6 +1009,7 @@ fn buildExample(
         b.path("src/start/start.zig"),
         lto,
         automount_d,
+        null,
         .{
             .pdclib = mods.pdclib,
             .nxdk = mods.nxdk,
@@ -1036,11 +1047,11 @@ fn buildExample(
 
     example_step.dependOn(create_xiso);
 
-    const run_cmd = b.addSystemCommand(&.{
-        "xemu",
-        "-dvd_path",
-        b.getInstallPath(.{ .custom = "examples" }, b.fmt("{s}.iso", .{name})),
-    });
+    const run_cmd = b.addSystemCommand(&.{ "xemu", "-dvd_path" });
+    run_cmd.addDirectoryArg2(
+        b.graph.path(.install_prefix, b.fmt("examples/{s}.iso", .{name})),
+        .{ .make_absolute = true },
+    );
     run_cmd.step.dependOn(example_step);
     const run_step = b.step(b.fmt("run-{s}", .{name}), b.fmt("Build all examples and Run the '{s}' example", .{name}));
     run_step.dependOn(&run_cmd.step);
@@ -1137,4 +1148,20 @@ pub fn addCIncludePaths(mod: *std.Build.Module, nxdk_zig_dep: *std.Build.Depende
     const usb_tree = mod.owner.addWriteFiles();
     _ = usb_tree.addCopyDirectory(libusbohci_dep.path("inc"), "usb/libusbohci/inc", .{});
     mod.addIncludePath(usb_tree.getDirectory());
+}
+
+pub fn addCIncludePathsTranslateC(tr: anytype, nxdk_zig_dep: *std.Build.Dependency) void {
+    const nxdk_dep = nxdk_zig_dep.builder.dependency("nxdk", .{});
+    for (nxdk_c_include_dirs) |dir| tr.addIncludePath(nxdk_dep.path(dir));
+
+    const pdclib_dep = nxdk_zig_dep.builder.dependency("nxdk-pdclib", .{});
+    for (pdclib_c_include_dirs) |dir| tr.addIncludePath(pdclib_dep.path(dir));
+
+    const libusbohci_dep = nxdk_zig_dep.builder.dependency("libusbohci", .{});
+    for (libusbohci_c_include_dirs) |dir| tr.addIncludePath(libusbohci_dep.path(dir));
+    tr.defineCMacro("USBH_USE_EXTERNAL_CONFIG", "\"usbh_config_xbox.h\"");
+
+    const usb_tree = tr.run.step.owner.addWriteFiles();
+    _ = usb_tree.addCopyDirectory(libusbohci_dep.path("inc"), "usb/libusbohci/inc", .{});
+    tr.addIncludePath(usb_tree.getDirectory());
 }

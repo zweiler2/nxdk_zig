@@ -403,8 +403,8 @@ fn fileStat(
         status_bits == xboxkrnl.ntstatus.STATUS_BUFFER_OVERFLOW)
     {
         return .{
-            .inode = @bitCast(info.InternalInformation.IndexNumber),
-            .size = @bitCast(info.StandardInformation.EndOfFile),
+            .inode = @bitCast(info.InternalInformation.IndexNumber.QuadPart),
+            .size = @bitCast(info.StandardInformation.EndOfFile.QuadPart),
             .block_size = blockSize(),
             .permissions = .default_file,
             .kind = if (info.BasicInformation.FileAttributes &
@@ -437,7 +437,7 @@ fn fileStat(
 
     return .{
         .inode = 0,
-        .size = @bitCast(open_info.EndOfFile),
+        .size = @bitCast(open_info.EndOfFile.QuadPart),
         .block_size = blockSize(),
         .permissions = .default_file,
         .kind = if (open_info.FileAttributes & xboxkrnl.xboxdef.FILE_ATTRIBUTE_DIRECTORY != 0)

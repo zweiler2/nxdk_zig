@@ -53,10 +53,10 @@ pub export fn main() u8 {
     fault.install(&fault_reg);
 
     const fn_info = @typeInfo(@TypeOf(user.main)).@"fn";
-    if (fn_info.params.len == 0) {
+    if (fn_info.param_types.len == 0) {
         return wrapMain(user.main());
     }
-    if (fn_info.params[0].type.? == std.process.Init.Minimal) {
+    if (fn_info.param_types[0].? == std.process.Init.Minimal) {
         return wrapMain(user.main(std.process.Init.Minimal{
             .environ = .empty,
             .args = .{ .vector = &.{} },

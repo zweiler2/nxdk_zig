@@ -351,15 +351,13 @@ const DebugInfo = struct {
 
                 // If our address points into this site, get the source location(s) it
                 // points at
-                for (pdb.getInlineeSourceLines(
-                    module,
-                    inline_site.inlinee,
-                )) |inlinee_src_line| {
+                var inlinee_lines = pdb.getInlineeSourceLines(module, inline_site.inlinee);
+                while (inlinee_lines.next()) |inlinee_src_line| {
                     const maybe_loc = pdb.getInlineSiteSourceLocation(
                         text_arena,
                         module,
                         inline_site,
-                        inlinee_src_line.info,
+                        inlinee_src_line,
                         offset_in_func,
                     ) catch continue;
                     var loc = maybe_loc orelse continue;
