@@ -2,7 +2,7 @@
     .name = .nxdk_zig,
     .version = "0.0.1",
     .fingerprint = 0xafa22edb596eb105, // Changing this has security and trust implications.
-    .minimum_zig_version = "0.16.0",
+    .minimum_zig_version = "0.17.0",
     .dependencies = .{
         .nxdk = .{
             .url = "git+https://github.com/XboxDev/nxdk.git#58427c078b4ccb0121f359b6b6c536b3b2914976",
